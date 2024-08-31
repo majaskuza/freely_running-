@@ -1,0 +1,19 @@
+#code to analyse data with DLC and obtain labelled videos
+
+conda activate DEEPLABCUT
+ipython
+import deeplabcut
+from pathlib import Path
+
+#select videos for analysis    
+config_path = r'C:\Users\Experiment\Desktop\Jun_DLC\config.yaml'
+folder_path = r'C:\Users\Experiment\Desktop\new_DLC_analysis' 
+video_files_pattern = '*.mp4'
+folder_path_obj = Path(folder_path)
+new_videos = list(folder_path_obj.glob(video_files_pattern))
+
+#analysis and labelling of videos
+deeplabcut.analyze_videos(config_path, new_videos, shuffle=1, save_as_csv=True, videotype='mp4')
+deeplabcut.filterpredictions(config_path, new_videos, shuffle=1, save_as_csv=True, videotype='mp4')
+deeplabcut.create_labeled_video(config_path, new_videos, filtered=True, videotype = 'mp4', save_frames=False)
+deeplabcut.plot_trajectories(config_path, new_videos)
