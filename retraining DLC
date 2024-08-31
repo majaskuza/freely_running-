@@ -1,0 +1,44 @@
+'''code to retrain a DLC network
+   open terminal as admin'''
+
+conda activate DEEPLABCUT
+ipython
+import deeplabcut
+config_path = r'C:\\Users\\Experiment\\Desktop\\Jun\\DLC\\config.yaml'
+
+#select mp4 videos for analysis
+from pathlib import Path
+
+folder_path = r'C:\Users\Experiment\Desktop\cropped_videos'  #using short 1 min videos for retraining
+video_files_pattern = '*.mp4'
+folder_path_obj = Path(folder_path)
+new_videos = list(folder_path_obj.glob(video_files_pattern))
+
+#analyse and label videos
+deeplabcut.analyze_videos(config_path, new_videos, shuffle=1, save_as_csv=True, videotype='mp4')
+deeplabcut.filterpredictions(config_path, new_videos, shuffle=1, save_as_csv=True, videotype='mp4')
+deeplabcut.create_labeled_video(config_path, new_videos, filtered=True, videotype = 'mp4', save_frames=False)
+
+#extract outlier frames
+#autmatic way
+deeplabcut.extract_outlier_frames(config_path, new_videos, automatic=True) 
+
+#manual version for specific video (done seperately for each video, selected 10 frames)
+#deeplabcut.extract_outlier_frames(config_path, [r'C:\Users\Experiment\Desktop\cropped_videos\AV043\2024-03-01.mp4'], outlieralgorithm='uncertain')
+
+#add new videos to the config file
+deeplabcut.add_new_videos(config_path, new_videos, copy_videos=False)
+
+deeplabcut.refine_labels(config_path)  
+#go to DLC GUI > extract outlier frames > labelling gui > open folder > select one of the new folders in labelled data 
+deeplabcut.merge_datasets(config_path)
+deeplabcut.check_labels(config_path)
+deeplabcut.create_training_dataset(config_path, augmenter_type='imgaug')
+deeplabcut.train_network(config_path)
+#after desired number of iterations stop with ctrl C
+deeplabcut.evaluate_network(config_path,Shuffles=[1], plotting=True)
+
+
+
+
+
