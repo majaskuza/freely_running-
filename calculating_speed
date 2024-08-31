@@ -1,0 +1,628 @@
+#code for caclualting the speed in the open arena
+
+from pathlib import Path
+import numpy as np
+import sys
+import glob
+import pandas as pd
+import cv2
+from scipy.interpolate import interp1d
+from scipy.ndimage import gaussian_filter1d
+from scipy import stats
+from scipy.stats import binned_statistic
+from scipy.io import loadmat
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+mpl.use('Qt5Agg')
+from collections import namedtuple
+from scipy.spatial import distance
+import warnings
+from matplotlib.animation import FuncAnimation
+from matplotlib.ticker import AutoMinorLocator, AutoLocator
+import subprocess
+import os
+os.chdir(fr"C:\Users\Experiment\Desktop\codes\neural\polished_codes")
+from calibration import get_scorer
+from time_in_each_roi import calc_distance_between_points_in_a_vector_2d
+
+
+def read_dlc_data(DLC_coordinates):
+    data = pd.read_hdf(DLC_coordinates)
+    return data
+
+def extract_body_part_data(data, all_body_parts, part_type):
+    scorer = get_scorer(data)
+    dat = np.empty(shape=(len(data), len(all_body_parts)))
+    for i, body_part in enumerate(all_body_parts):
+        if part_type == 'x':
+            dat[:, i] = data.loc[:, (scorer, body_part, 'x')].values
+        elif part_type == 'y':
+            dat[:, i] = data.loc[:, (scorer, body_part, 'y')].values
+        elif part_type == 'likelihood':
+            dat[:, i] = data.loc[:, (scorer, body_part, 'likelihood')].values
+    df = pd.DataFrame(dat, columns=all_body_parts, index=data.index)
+    return df
+
+def get_head_location_array(data, coordinate, max_x=640, max_y=512):
+    body_parts = ["mid_back", "mouse_center", "mid_backend", "mid_backend2", "mid_backend3", "left_shoulder", "left_midside", "left_hip", "right_shoulder", "right_midside", "right_hip", "tail_end", "head_midpoint"]
+    dat_x = extract_body_part_data(data, body_parts, 'x')
+    dat_y = extract_body_part_data(data, body_parts, 'y')
+    likelihood = extract_body_part_data(data, body_parts, 'likelihood')
+    
+    median_x = np.median(dat_x, axis=1)
+    median_y = np.median(dat_y, axis=1)
+    median_likelihood = np.median(likelihood, axis=1)
+    
+    index_out = (median_x < 1) | (median_x > max_x) | (median_y < 1) | (median_y > max_y) | (median_likelihood < 0.9)  #modified likelihood from 0.9
+    
+    for i, is_outlier in enumerate(index_out):
+        if is_outlier:  
+            before_index = next((j for j in range(i - 1, -1, -1) if not index_out[j]), None)
+            after_index = next((j for j in range(i + 1, len(index_out)) if not index_out[j]), None)
+
+            if before_index is not None and after_index is not None:
+                x_interp = interp1d([before_index, after_index], [median_x[before_index], median_x[after_index]], kind='linear', fill_value='extrapolate')
+                y_interp = interp1d([before_index, after_index], [median_y[before_index], median_y[after_index]], kind='linear', fill_value='extrapolate')
+                median_x[i] = x_interp(i)
+                median_y[i] = y_interp(i)
+
+    if coordinate == 'x':
+        return median_x
+    elif coordinate == 'y':
+        return median_y
+    else:
+        return "please enter coordinate"
+    
+    
+
+def get_ROI_data(subject, date):
+    DLC_coordinates = fr"C:\Users\Experiment\Desktop\my DLC things\analyzed_DLC\{subject}_{date}DLC_resnet50_downsampled_trialJul11shuffle1_150000_filtered.h5"
+    data = read_dlc_data(DLC_coordinates)
+    dat_x = get_head_location_array(data, 'x')
+    dat_y = get_head_location_array(data, 'y')
+    v1_array = np.stack((dat_x, dat_y), axis=1) #to compute velocity with their function 
+    speed =  calc_distance_between_points_in_a_vector_2d(v1_array) 
+    bp_data = np.stack((dat_x, dat_y, speed), axis=1)
+    rois_path =  r"C:\Users\Experiment\Desktop\running wheel ROI\ROIs.csv"  #dictionary with name and position of each roi 
+    rois = pd.read_csv(rois_path)
+    rois_df = pd.read_csv(rois_path)
+    TLX = rois_df['TLX'].iloc[0]
+    TLY = rois_df['TLY'].iloc[0]
+    BRX = rois_df['BRX'].iloc[0]
+    BRY = rois_df['BRY'].iloc[0]
+    Position = namedtuple('position', ['topleft', 'bottomright'])
+    position_tuple = Position((TLX, TLY), (BRX, BRY))
+    rois = {'runningwheel': position_tuple}
+    return bp_data, rois
+
+#labelling whether in each frame the mice was in the ROI
+def tracking_rois_by_frame(bp_data, rois):
+    # Centers of the roi
+    centers = []
+    for points in rois.values():
+        center_x = (points.topleft[0] + points.bottomright[0]) / 2
+        center_y = (points.topleft[1] + points.bottomright[1]) / 2
+        center = np.asarray([center_x, center_y])
+        centers.append(center)
+    roi_names = list(rois.keys())
+    # Distance to each roi for each frame
+    data_length = bp_data.shape[0]
+    distances = np.zeros((data_length, len(centers)))
+    for idx, center in enumerate(centers):
+        cnt = np.tile(center, data_length).reshape((data_length, 2))
+        dist = np.hypot(np.subtract(cnt[:, 0], bp_data[:, 0]), np.subtract(cnt[:, 1], bp_data[:, 1]))
+        distances[:, idx] = dist
+    # Get which roi is closest at each frame
+    sel_rois = np.argmin(distances, 1)
+    roi_at_each_frame = tuple([roi_names[x] for x in sel_rois])
+    def sort_roi_points(roi):
+        return np.sort([roi.topleft[0], roi.bottomright[0]]), np.sort([roi.topleft[1], roi.bottomright[1]])
+    cleaned_rois = []
+    for i, roi in enumerate(roi_at_each_frame):
+        x, y = bp_data[i, 0], bp_data[i, 1]
+        X, Y = sort_roi_points(rois[roi]) # Get x, y coordinates of roi points
+        if not X[0] <= x <= X[1] or not Y[0] <= y <= Y[1]:
+            cleaned_rois.append('openarena')
+        else:
+            cleaned_rois.append(roi)
+    return cleaned_rois
+
+
+
+def get_corner_roi(subject, date, data):
+    roi_names = ['corner_left', 'corner_middle', 'right_corner']
+    bp_data = get_bp_data (subject, date, data)
+    
+    rois_dict = {}
+    for roi_name in roi_names:
+        rois_dict[roi_name] = get_ROI_corner_data(roi_name)
+        
+    corner_left = rois_dict['corner_left']
+    corner_middle = rois_dict['corner_middle']
+    right_corner = rois_dict['right_corner']
+    
+    cleaned_rois_corner_left = tracking_corner_rois_by_frame(bp_data, corner_left)
+    cleaned_rois_corner_middle = tracking_corner_rois_by_frame(bp_data, corner_middle)
+    cleaned_rois_corner_right = tracking_corner_rois_by_frame(bp_data, right_corner)
+    
+    length = len(cleaned_rois_corner_left)
+    platform_corner_roi = ['notcorner'] * len(cleaned_rois_corner_left)
+    for i in range(length):
+        if (cleaned_rois_corner_left[i] == 'corner' or
+            cleaned_rois_corner_middle[i] == 'corner' or
+            cleaned_rois_corner_right[i] == 'corner'):
+            platform_corner_roi[i] = 'corner'
+    return platform_corner_roi
+    
+
+def get_bp_data (subject, date, data):
+    DLC_coordinates = fr"C:\Users\Experiment\Desktop\my DLC things\analyzed_DLC\{subject}_{date}DLC_resnet50_downsampled_trialJul11shuffle1_150000_filtered.h5"
+    data = read_dlc_data(DLC_coordinates)
+    dat_x = get_head_location_array(data, 'x')
+    dat_y = get_head_location_array(data, 'y')
+    v1_array = np.stack((dat_x, dat_y), axis=1) #to compute velocity with their function 
+    speed =  calc_distance_between_points_in_a_vector_2d(v1_array)
+    bp_data = np.stack((dat_x, dat_y, speed), axis=1)
+    return bp_data
+
+
+def get_ROI_corner_data(ROI_name):
+    rois_path = fr"C:\Users\Experiment\Desktop\running wheel ROI\{ROI_name}.csv"  # Dictionary with name and position of each ROI 
+    rois_df = pd.read_csv(rois_path)
+    TLX = rois_df['TLX'].iloc[0]
+    TLY = rois_df['TLY'].iloc[0]
+    BRX = rois_df['BRX'].iloc[0]
+    BRY = rois_df['BRY'].iloc[0]
+    Position = namedtuple('Position', ['topleft', 'bottomright'])
+    position_tuple = Position((TLX, TLY), (BRX, BRY))
+    rois = {ROI_name: position_tuple}
+    return rois
+
+def tracking_corner_rois_by_frame(bp_data, rois):
+    # Centers of the roi
+    centers = []
+    for points in rois.values():
+        center_x = (points.topleft[0] + points.bottomright[0]) / 2
+        center_y = (points.topleft[1] + points.bottomright[1]) / 2
+        center = np.asarray([center_x, center_y])
+        centers.append(center)
+    roi_names = list(rois.keys())
+    # Distance to each roi for each frame
+    data_length = bp_data.shape[0]
+    distances = np.zeros((data_length, len(centers)))
+    for idx, center in enumerate(centers):
+        cnt = np.tile(center, data_length).reshape((data_length, 2))
+        dist = np.hypot(np.subtract(cnt[:, 0], bp_data[:, 0]), np.subtract(cnt[:, 1], bp_data[:, 1]))
+        distances[:, idx] = dist
+    # Get which roi is closest at each frame
+    sel_rois = np.argmin(distances, 1)
+    roi_at_each_frame = tuple([roi_names[x] for x in sel_rois])
+    def sort_roi_points(roi):
+        return np.sort([roi.topleft[0], roi.bottomright[0]]), np.sort([roi.topleft[1], roi.bottomright[1]])
+    cleaned_rois = []
+    for i, roi in enumerate(roi_at_each_frame):
+        x, y = bp_data[i, 0], bp_data[i, 1]
+        X, Y = sort_roi_points(rois[roi]) # Get x, y coordinates of roi points
+        if not X[0] <= x <= X[1] or not Y[0] <= y <= Y[1]:
+            cleaned_rois.append('notcorner')  
+        else:
+            cleaned_rois.append('corner')
+    return cleaned_rois
+
+
+
+def find_state_transitions_and_durations(data_rois):
+    transitions = []
+    durations = []
+    current_state = None
+    state_start_time = None
+    results = []
+
+    for idx, state in enumerate(data_rois):
+        if current_state is None:
+            current_state = state
+            state_start_time = idx
+        elif state != current_state:
+            duration = idx - state_start_time
+            if duration >= 60:     
+                results.append({
+                    "state": current_state,
+                    "start_time": state_start_time,
+                    "end_time": idx,
+                    "duration": duration
+                })
+            else:
+                # Merge with the previous state if results is not empty
+                if results:
+                    results[-1]["end_time"] = idx
+                    results[-1]["duration"] += duration
+            current_state = state
+            state_start_time = idx
+
+    final_duration = len(data_rois) - state_start_time
+    if final_duration >= 60:  #also modified from 3*60
+        results.append({
+            "state": current_state,
+            "start_time": state_start_time,
+            "end_time": len(data_rois),
+            "duration": final_duration
+        })
+    elif results and current_state != "openarena":
+        results[-1]["end_time"] = len(data_rois)
+        results[-1]["duration"] += final_duration
+    return pd.DataFrame(results)
+
+
+def get_state_transitions(subject, date):
+    DLC_coordinates = fr"C:\Users\Experiment\Desktop\my DLC things\analyzed_DLC\{subject}_{date}DLC_resnet50_downsampled_trialJul11shuffle1_150000_filtered.h5"
+    data = read_dlc_data(DLC_coordinates)
+    [bp_data, rois] = get_ROI_data(subject, date)
+    data_rois = tracking_rois_by_frame(bp_data, rois)
+    platform_corner_roi = get_corner_roi(subject, date, data)
+    length = len(data_rois)
+    for i in range(len(data_rois)):
+        if (platform_corner_roi[i] == 'corner'): 
+            data_rois[i] = 'openarena'
+    state_transitions = find_state_transitions_and_durations(data_rois)
+    return state_transitions
+
+
+def get_plot_of_states_over_time(state_transitions):
+    df = state_transitions
+    fig, ax = plt.subplots()
+    for index, row in df.iterrows():
+        if row['state'] == 'runningwheel':
+            color = 'green'
+        elif row['state'] == 'openarena':
+            color = 'blue'
+        else:
+            color = 'grey'  # Default color for other states
+        ax.barh(row['state'], row['duration'], left=row['start_time'], color=color)
+    # Set labels and title
+    ax.set_xlabel('Time')
+    ax.set_ylabel('State')
+    ax.set_title('State Transitions Over Time')
+    plt.show()
+
+def get_openarena_only_coordinates(data, subject, date):
+    state_transitions = get_state_transitions(subject, date)
+    openarena_start_times = state_transitions.loc[state_transitions['state'] == 'openarena', 'start_time'].to_numpy()
+    openarena_end_times = state_transitions.loc[state_transitions['state'] == 'openarena', 'end_time'].to_numpy()
+    dat_x = get_head_location_array(data, 'x')
+    dat_y = get_head_location_array(data, 'y')
+    dat_times = np.arange(len(dat_x))
+    df = pd.DataFrame({'time': dat_times, 'x': dat_x, 'y': dat_y})
+    openarena_times = np.concatenate([np.arange(start, end + 1) for start, end in zip(openarena_start_times, openarena_end_times)])
+    df.loc[~df['time'].isin(openarena_times), ['x', 'y']] = np.nan
+    dat_x = df['x'].values
+    dat_y = df['y'].values
+    dat_x = dat_x * 0.0917
+    dat_y = dat_y * 0.0917
+    return dat_x, dat_y
+
+
+def get_good_frames(state_transitions, videoPath, data, step):
+    start_frame = 0
+    end_frame = len(data.index)
+    cap = cv2.VideoCapture(videoPath)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    
+    openarena_start_times = state_transitions.loc[state_transitions['state'] == 'openarena', 'start_time'].to_numpy()
+    openarena_end_times = state_transitions.loc[state_transitions['state'] == 'openarena', 'end_time'].to_numpy()
+    openarena_times = np.concatenate([np.arange(start, end + 1) for start, end in zip(openarena_start_times, openarena_end_times)])
+ 
+    frames_sampled = np.arange(start_frame, (end_frame - step), step)
+    frames_sampled_next =  frames_sampled + step   
+    frame_labels = np.arange(int(start_frame + step / 2), int(end_frame - (step / 2)), int(step))
+    
+    #narrowing down to only frames when in openarena
+    frames_sampled = np.intersect1d(frames_sampled, openarena_times)  
+    frames_sampled_next = np.intersect1d(frames_sampled_next, openarena_times)
+    matching_indices = np.isin(frames_sampled, frames_sampled_next)
+    frames_sampled = frames_sampled[matching_indices]
+    frames_sampled_next = frames_sampled + step
+
+    frame_labels_openarena = np.intersect1d(frame_labels, openarena_times) 
+
+    filtered_frame_labels_openarena = []
+    filtered_frames_sampled = []
+    filtered_frames_sampled_next = []
+    for label in frame_labels_openarena:
+        for sampled, next_sampled in zip(frames_sampled, frames_sampled_next):
+            if sampled < label < next_sampled:
+                filtered_frame_labels_openarena.append(label)
+                filtered_frames_sampled.append(sampled)
+                filtered_frames_sampled_next.append(next_sampled)
+                break
+
+    frames_sampled = np.array(filtered_frames_sampled)
+    frames_sampled_next = np.array(filtered_frames_sampled_next)
+    frame_labels_openarena = np.array(filtered_frame_labels_openarena)   
+    return frames_sampled, frames_sampled_next, frame_labels_openarena, frame_labels
+
+
+
+def get_open_arena_speed(data, step, videoPath, subject, date, state_transitions):   
+    start_frame = 0
+    end_frame = len(data.index)
+    cap = cv2.VideoCapture(videoPath)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    
+    [frames_sampled, frames_sampled_next, frame_labels_openarena, frame_labels] = get_good_frames(state_transitions, videoPath, data, step)
+    [dat_x, dat_y] = get_openarena_only_coordinates(data, subject, date)
+    
+    change_in_x = (dat_x[frames_sampled_next] - dat_x[frames_sampled]) ** 2
+    change_in_y = (dat_y[frames_sampled_next] - dat_y[frames_sampled]) ** 2
+    change_in_location = np.sqrt(change_in_x + change_in_y)
+    
+    dat_speed = change_in_location / (step / fps)
+    index_out = dat_speed > 10 * np.median(dat_speed[~np.isnan(dat_speed)])   #indexing out too high speed values (excluding the Nan)
+    for i, is_outlier in enumerate(index_out):
+        if is_outlier:
+            before_index = next((j for j in range(i - 1, -1, -1) if not index_out[j]), None)
+            after_index = next((j for j in range(i + 1, len(dat_speed)) if not index_out[j]), None)
+            if before_index is not None and after_index is not None:
+                speed_interp = interp1d([before_index, after_index], [dat_speed[before_index], dat_speed[after_index]], kind='linear', fill_value='extrapolate')
+                dat_speed[i] = speed_interp(i)
+
+    all_speed = np.full(len(frame_labels), np.nan)
+    speed_indices = np.isin(frame_labels, frame_labels_openarena)
+    all_speed[speed_indices] = dat_speed
+    return all_speed, frame_labels
+
+
+
+def wheel_velocity(subject, date, filenumber):
+    folder = Path(fr"\\zortex\Subjects\{subject}\{date}\{filenumber}") #folder = Path(fr"\\zaru.cortexlab.net\Subjects\{subject}\{date}\3")     #for recordings before 06/03
+    timeline_file = glob.glob(os.path.join(folder, f'*_Timeline.mat'))[0]    # load time in timeline
+    time = loadmat(timeline_file)
+    timestamps = time['Timeline']['rawDAQTimestamps'].item()[0, :]
+    dt = np.unique(np.round(np.diff(timestamps), 4)).item()     # temporal resolution from timeline    
+    rotary = np.load(os.path.join(folder, 'rotaryEncoder.raw.npy'), allow_pickle=True)  # load position from  rotary encoder
+    pos_tmp = rotary[:, 0]
+    pos_tmp[pos_tmp > 1e8] = 0  # in the beginning weird artefacts
+    artefacts = np.where(abs(np.insert(np.diff(pos_tmp), 0, 0)) > 1000)[0]
+    pos_tmp[artefacts] = pos_tmp[artefacts - 1]
+    diameter = 10  #changed this  
+    ticks_per_cycle = 1024
+    position = np.pi * pos_tmp * diameter / ticks_per_cycle
+    # smooth signal
+    smooth_size = 0.03  # in seconds
+    diff_pos = np.insert(np.diff(position), 0, 0) / dt
+    wheel_mvt = gaussian_filter1d(abs(diff_pos), smooth_size / dt)
+    new_dt = .1 # resolution 0.1s
+    target_bins = np.arange(timestamps[0], timestamps[-1], new_dt)
+    downsampled_wheel = binned_statistic(timestamps, wheel_mvt, bins=target_bins).statistic
+    num_samples = len(downsampled_wheel)
+    downsampled_wheel_times = np.arange(num_samples) * new_dt
+    return downsampled_wheel, downsampled_wheel_times
+
+def bincount2D(x, y, xbin=0.1, ybin=0, xlim=None, ylim=None, weights=None,xsmoothing=0):
+    """
+     2D histogram by aggregating values in a 2D array
+   x: values to bin along the 2nd dimension (c-contiguous)
+    y: values to bin along the 1st dimension
+   xbin: bin size along 2nd dimension,  0: aggregate according to unique values
+   ybin: bin size along 1st dimension  0: aggregate according to unique values
+       
+     """
+    # if no bounds provided, use min/max of vectors
+    if xlim is None:
+        xlim = [np.min(x), np.max(x)]
+    if ylim is None:
+        ylim = [np.min(y), np.max(y)]
+
+    def _get_scale_and_indices(v, bin, lim):
+        if np.isscalar(bin) and bin != 0:
+            scale = np.arange(lim[0], lim[1] + bin / 2, bin)
+            ind = (np.floor((v - lim[0]) / bin)).astype(np.int64)
+        # if bin == 0, aggregate over unique values
+        else:
+            scale, ind = np.unique(v, return_inverse=True)
+        return scale, ind
+
+    xscale, xind = _get_scale_and_indices(x, xbin, xlim)
+    yscale, yind = _get_scale_and_indices(y, ybin, ylim)
+    # aggregate by using bincount on absolute indices for a 2d array
+    nx, ny = [xscale.size, yscale.size]
+    ind2d = np.ravel_multi_index(np.c_[yind, xind].transpose(), dims=(ny, nx))
+    r = np.bincount(ind2d, minlength=nx * ny, weights=weights).reshape(ny, nx)
+
+    # if a set of specific values is requested output an array matching the scale dimensions
+    if not np.isscalar(xbin) and xbin.size > 1:
+        _, iout, ir = np.intersect1d(xbin, xscale, return_indices=True)
+        _r = r.copy()
+        r = np.zeros((ny, xbin.size))
+        r[:, iout] = _r[:, ir]
+        xscale = xbin
+
+    if not np.isscalar(ybin) and ybin.size > 1:
+        _, iout, ir = np.intersect1d(ybin, yscale, return_indices=True)
+        _r = r.copy()
+        r = np.zeros((ybin.size, r.shape[1]))
+        r[iout, :] = _r[ir, :]
+        yscale = ybin
+
+    if xsmoothing>0: 
+        w = xscale.size #[tscale.size - 1 if tscale.size % 2 == 0 else tscale.size]
+        window = gaussian(w, std=xsmoothing / xbin)
+        # half (causal) gaussian filter
+        window[:int(np.ceil(w/2))] = 0
+        window /= np.sum(window) # 
+        binned_spikes_conv = [convolve(r[j, :], window, mode='same', method='auto')[:,np.newaxis] for j in range(r.shape[0])]#[:-1]
+        r = np.concatenate(binned_spikes_conv,axis=1).T
+
+    return r, xscale, yscale
+
+
+
+
+
+def calculate_interpolated_speed (subject, date, filenumber, probe2check, spikeTimes, spikeClusters, data, videoPath, topCam, state_transitions, wheelonsets, wheeloffsets, xbin=0.1, step=6): #modified from xbin=0.1 - time bin width for spiking clusters
+    [r, tscale, clusters] = bincount2D(spikeTimes, spikeClusters, xbin = xbin, ybin = 0)  #modified here from xbin=0.1 too
+    [dat_speed, speedTimes] = get_open_arena_speed(data, step, videoPath, subject, date, state_transitions) #modified with ROI speed
+    speedTimes = topCam[speedTimes] 
+    interpSpeedDLC = np.interp(tscale, speedTimes, dat_speed)
+    interpSpeedDLC = gaussian_filter1d(interpSpeedDLC, sigma=1)
+    [downsampled_wheel, downsampled_wheel_times] = wheel_velocity(subject, date, filenumber) 
+    interpSpeedWheel = np.interp(tscale, downsampled_wheel_times, downsampled_wheel)
+    interpSpeedWheel = gaussian_filter1d(interpSpeedWheel, sigma=1)
+    
+    for i in range(len(wheelonsets)):  
+        start_idx = wheelonsets[i]
+        end_idx = wheeloffsets[i]
+        interpSpeedDLC[start_idx:end_idx + 1] = np.nan
+    DLC_periods = ~np.isnan(interpSpeedDLC) 
+    interpSpeedWheel[DLC_periods] = np.nan
+    return interpSpeedDLC, interpSpeedWheel, tscale
+
+def get_onset_offset_speed_trace(speed, onsets, offsets):
+    traces = [speed[onset:offset] for onset, offset in zip(onsets, offsets)]
+    return np.concatenate(traces)
+
+def get_r_for_correlation(r, onsets, offsets):
+    concatenated_r = [np.concatenate([neuron_data[onset:offset] for onset, offset in zip(onsets, offsets)]) for neuron_data in r]
+    return np.array(concatenated_r)
+
+def compute_correlations(r, speed, onsets, offsets):
+    speed_trace = get_onset_offset_speed_trace(speed, onsets, offsets)
+    r_processed = stats.zscore(r, axis=1)
+    concatenated_r = get_r_for_correlation(r_processed, onsets, offsets) #using z scored r  
+    correlations = np.zeros(r.shape[0])
+    for j in range(r.shape[0]):
+        trace_r = concatenated_r[j]
+        valid_indices = ~np.isnan(speed_trace) 
+        trace_r_valid = trace_r[valid_indices]  
+        speed_trace_valid = speed_trace[valid_indices] 
+        correlations[j] = np.corrcoef(trace_r_valid, speed_trace_valid)[0, 1]    
+    return correlations
+
+    
+def correlation_distribution(DLC_corrcoef):
+    fig, ax = plt.subplots()
+    ax.hist(DLC_corrcoef, bins='auto', density=True, alpha=0.7)
+    ax.set_title('Distribution of DLC speed correlations')
+    ax.set_xlabel('Correlation coefficient')
+    ax.set_ylabel('Density')
+    plt.show()
+
+
+def highest_corr_neurons(corrcoef, clustersID):
+    pos_indices = np.where(corrcoef > 0)[0]
+    neg_indices = np.where(corrcoef < 0)[0]
+    
+    pos_corr_neurons = pos_indices[np.argsort(corrcoef[pos_indices])[-2:]] if pos_indices.size else []
+    neg_corr_neurons = neg_indices[np.argsort(corrcoef[neg_indices])[:2]] if neg_indices.size else []
+    
+    pos_corr_coefficient = [corrcoef[idx] for idx in pos_corr_neurons]
+    neg_corr_coefficient = [corrcoef[idx] for idx in neg_corr_neurons]
+    
+    pos_corr_neurons = [clustersID[idx] for idx in pos_corr_neurons]
+    neg_corr_neurons = [clustersID[idx] for idx in neg_corr_neurons]
+    
+    return pos_corr_neurons, pos_corr_coefficient, neg_corr_neurons, neg_corr_coefficient
+
+def get_highest_corr_neurons(corrcoef_wheel, corrcoef_DLC, clustersID):
+    wheel_pos_neurons, wheel_pos_coef, wheel_neg_neurons, wheel_neg_coef = highest_corr_neurons(corrcoef_wheel, clustersID)
+    DLC_pos_neurons, DLC_pos_coef, DLC_neg_neurons, DLC_neg_coef = highest_corr_neurons(corrcoef_DLC, clustersID)
+    
+    df_wheel_pos = pd.DataFrame({'ID': wheel_pos_neurons, 'Correlation': wheel_pos_coef})
+    df_wheel_neg = pd.DataFrame({'ID': wheel_neg_neurons, 'Correlation': wheel_neg_coef})
+    
+    df_DLC_pos = pd.DataFrame({'ID': DLC_pos_neurons, 'Correlation': DLC_pos_coef})
+    df_DLC_neg = pd.DataFrame({'ID': DLC_neg_neurons, 'Correlation': DLC_neg_coef})
+    
+    return df_wheel_pos, df_wheel_neg, df_DLC_pos, df_DLC_neg
+
+
+def extract_corr_and_ids(corrcoef_wheel, corrcoef_DLC, clustersID):
+    wheel_pos, wheel_neg, DLC_pos, DLC_neg = get_highest_corr_neurons(corrcoef_wheel, corrcoef_DLC, clustersID)
+    
+    wheel_pos_clusterIDs = wheel_pos['ID'].tolist()
+    wheel_pos_correlations = wheel_pos['Correlation'].tolist()
+
+    wheel_neg_clusterIDs = wheel_neg['ID'].tolist()
+    wheel_neg_correlations = wheel_neg['Correlation'].tolist()
+
+    dlc_pos_clusterIDs = DLC_pos['ID'].tolist()
+    dlc_pos_correlations = DLC_pos['Correlation'].tolist()
+
+    dlc_neg_clusterIDs = DLC_neg['ID'].tolist()
+    dlc_neg_correlations = DLC_neg['Correlation'].tolist()
+    
+    return (wheel_pos_clusterIDs, wheel_pos_correlations, wheel_neg_clusterIDs, wheel_neg_correlations,
+            dlc_pos_clusterIDs, dlc_pos_correlations, dlc_neg_clusterIDs, dlc_neg_correlations)
+
+
+def get_highest_indices (corrcoef_wheel, corrcoef_DLC):
+    
+    initial_threshold=0.09
+    step=0.01
+    def find_indices_with_threshold(threshold):
+        indices_DLC_positive_wheel_negative = np.where((corrcoef_DLC > threshold) & (corrcoef_wheel < -threshold))[0]
+        indices_wheel_positive_DLC_negative = np.where((corrcoef_wheel > threshold) & (corrcoef_DLC < -threshold))[0]
+        indices_DLC_positive_wheel_zero = np.where((corrcoef_DLC > threshold) & (corrcoef_wheel > -threshold) & (corrcoef_wheel < threshold))[0]
+        indices_wheel_positive_DLC_zero = np.where((corrcoef_wheel > threshold) & (corrcoef_DLC > -threshold) & (corrcoef_DLC < threshold))[0]
+        indices_DLC_negative_wheel_zero = np.where((corrcoef_DLC < -threshold) & (corrcoef_wheel > -threshold) & (corrcoef_wheel < threshold))[0]
+        indices_wheel_negative_DLC_zero = np.where((corrcoef_wheel < -threshold) & (corrcoef_DLC > -threshold) & (corrcoef_DLC < threshold))[0]
+        indices_both_negative = np.where((corrcoef_wheel < -threshold) & (corrcoef_DLC < -threshold))[0]
+        indices_both_positive = np.where((corrcoef_wheel > threshold) & (corrcoef_DLC > threshold))[0]
+        indices_both_zero = np.where((corrcoef_wheel > -threshold) & (corrcoef_wheel < threshold) & (corrcoef_DLC > -threshold) & (corrcoef_DLC < threshold))[0]
+
+        return {
+            "indices_DLC_positive_wheel_negative": indices_DLC_positive_wheel_negative,
+            "indices_wheel_positive_DLC_negative": indices_wheel_positive_DLC_negative,
+            "indices_DLC_positive_wheel_zero": indices_DLC_positive_wheel_zero,
+            "indices_wheel_positive_DLC_zero": indices_wheel_positive_DLC_zero,
+            "indices_DLC_negative_wheel_zero": indices_DLC_negative_wheel_zero,
+            "indices_wheel_negative_DLC_zero": indices_wheel_negative_DLC_zero,
+            "indices_both_negative": indices_both_negative,
+            "indices_both_positive": indices_both_positive,
+            "indices_both_zero": indices_both_zero
+        }
+
+    indices_sets = find_indices_with_threshold(initial_threshold)
+    results = {}
+
+    for key in indices_sets:
+        threshold = initial_threshold
+        while len(indices_sets[key]) < 2 and threshold > 0:
+            threshold -= step
+            indices_sets = find_indices_with_threshold(threshold)
+        
+         if 'DLC' in key:
+            results[key] = get_top_two_indices(indices_sets[key], corrcoef_DLC)
+        else:
+            results[key] = get_top_two_indices(indices_sets[key], corrcoef_wheel)
+    return (
+        results["indices_DLC_positive_wheel_negative"],
+        results["indices_wheel_positive_DLC_negative"],
+        results["indices_DLC_positive_wheel_zero"],
+        results["indices_wheel_positive_DLC_zero"],
+        results["indices_DLC_negative_wheel_zero"],
+        results["indices_wheel_negative_DLC_zero"],
+        results["indices_both_negative"],
+        results["indices_both_positive"],
+        results["indices_both_zero"]
+    )
+
+    
+def get_top_two_indices(indices, values):
+    if len(indices) == 0:
+        return None, None
+    elif len(indices) == 1:
+        return indices[0], None
+    else:
+        top_two_indices = indices[np.argsort(np.abs(values[indices]))][-2:][::-1]
+        top_two_indices = np.array(top_two_indices)
+        return top_two_indices
+
+
+def wheel_speed_correlation(subject, date, filenumber, spikeTimes, spikeClusters, clustersID, xbin=0.1):
+    [r, tscale, clusters] = bincount2D(spikeTimes, spikeClusters, xbin=0.1, ybin=0)
+    [downsampled_wheel, downsampled_wheel_times] = wheel_velocity(subject, date, filenumber) #modified part for wheel ; equivalent to dat_speed and speedTimes
+    interpSpeed = np.interp(tscale, downsampled_wheel_times, downsampled_wheel)
+    interpSpeed = gaussian_filter1d(interpSpeed, sigma=1)
+    r_processed = stats.zscore(r, axis=1)
+    wheel_corrcoef = [np.corrcoef(r_processed[np.where(clustersID==i)[0][0]], interpSpeed)[0, 1] for i in clustersID]
+    return wheel_corrcoef
