@@ -1,0 +1,115 @@
+# detection of onsets and offsets of wheel traces
+import os
+import glob
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+mpl.use('Qt5Agg')
+from scipy.stats import binned_statistic
+from scipy.io import loadmat
+from scipy.ndimage import gaussian_filter1d
+from pathlib import Path
+
+def get_wheel_data(subject, date, filenumber):
+    folder1 = Path(fr"\\zortex\Subjects\{subject}\{date}\{filenumber}")
+    folder2 = Path(fr"\\zaru.cortexlab.net\Subjects\{subject}\{date}\{filenumber}")
+    if folder1.exists():
+        folder = folder1
+    elif folder2.exists():
+        folder = folder2
+    else:
+        raise FileNotFoundError(f"Folder not found in either of the specified paths: {folder1} or {folder2}")
+    timeline_file = glob.glob(os.path.join(folder, '*_Timeline.mat'))[0]  # load time in timeline
+    time = loadmat(timeline_file)
+    timestamps = time['Timeline']['rawDAQTimestamps'].item()[0, :]
+    dt = np.unique(np.round(np.diff(timestamps), 4)).item()  # temporal resolution from timeline    
+    rotary = np.load(os.path.join(folder, 'rotaryEncoder.raw.npy'), allow_pickle=True)  # load position from rotary encoder
+    pos_tmp = rotary[:, 0]
+    pos_tmp[pos_tmp > 1e8] = 0  
+    artefacts = np.where(abs(np.insert(np.diff(pos_tmp), 0, 0)) > 1000)[0]
+    pos_tmp[artefacts] = pos_tmp[artefacts - 1]
+
+    # convert to cm
+    diameter = 10
+    ticks_per_cycle = 1024
+    position = np.pi * pos_tmp * diameter / ticks_per_cycle
+    
+    # smooth signal
+    smooth_size = 0.03  # in seconds
+    diff_pos = np.insert(np.diff(position), 0, 0) / dt
+    wheel_mvt = gaussian_filter1d(abs(diff_pos), smooth_size / dt)  
+
+    new_dt = 0.1  # resolution of 1/10 of a second
+    if new_dt != dt:
+        target_bins = np.arange(timestamps[0], timestamps[-1], new_dt)
+        downsampled_wheel = binned_statistic(timestamps, wheel_mvt, bins=target_bins).statistic
+    else:
+        downsampled_wheel = wheel_mvt
+
+    return downsampled_wheel, new_dt
+
+
+def detect_locomotion_episodes(subject,
+                               date,
+                               wheel_velocity,                   #ideally in cm/s
+                               smooth=True,                      #whether to smooth wheel velocity before detection
+                               min_time_between_onsets= 15,      # minimum time between bouts in samples (default is 5 for dt=.3s)
+                               min_bout_duration=5,
+                               min_break_after_bout=6,          #number of samples for which signal needs to stay below offset trheshold after offset
+                               threshold_onset=4, #i changed              #velocty threshold, cm/s
+                               min_velocity_threshold=2,        #min avergae velocity required for each locomotion bout
+                               threshold_offset=.5,            #velocity threshold
+                               plot=False,
+                               filter_time=None,                #returns onsets that fall in specified timestamps
+                               ): 
+    
+    if smooth:
+        wheel_velocity = gaussian_filter1d(wheel_velocity, 2, axis=0)
+    onsets = np.where(wheel_velocity > threshold_onset)[0]
+    try:
+        onsets = np.insert(np.array([o for oi, o in enumerate(onsets[1:]) if
+                                     (o - onsets[oi] > min_time_between_onsets)], dtype=int),
+                           0, onsets[0])
+        if filter_time is not None:
+            onsets = onsets[np.isin(onsets, filter_time)]
+        offsets = np.array(
+            [get_stable_offset(wheel_velocity, o, threshold_offset, max_stop=min_break_after_bout) for o in onsets])
+        # remove bouts that are too slow or too short
+        max_speed = np.array([np.max(wheel_velocity[o:offsets[oi]]) for oi, o in enumerate(onsets)])
+        bouts_duration = offsets - onsets
+        cond = np.bitwise_or(bouts_duration < min_bout_duration, max_speed < min_velocity_threshold)
+        onsets = np.delete(onsets, cond)
+        offsets = np.delete(offsets, cond)
+        bouts_duration = np.delete(bouts_duration, cond)
+        onsets_path = Path(fr"C:\Users\Experiment\Desktop\rotaryencoderoutput\wheel_onsets_{subject}_{date}.npy")
+        np.save(os.path.join(onsets_path), onsets)
+        offsets_path = Path(fr"C:\Users\Experiment\Desktop\rotaryencoderoutput\wheel_offsets_{subject}_{date}.npy")
+        np.save(os.path.join(offsets_path), offsets)
+        
+    except Exception as err:
+        print(err)
+        return [], [], []
+
+    if plot:
+        plt.figure(figsize=(18, 4))
+        plt.plot(wheel_velocity)
+        plt.vlines(onsets, ymin=-np.max(wheel_velocity) / 2, ymax=0, color='g', label='onset (green)')
+        plt.vlines(offsets, ymin=-np.max(wheel_velocity) / 2, ymax=0, color='r', label='offset (red)')
+        plt.xlabel('Time (.1s)')
+        plt.ylabel('Wheel Velocity (cm/.1s)')
+        plt.legend()
+        save_path = Path(fr"C:\Users\Experiment\Desktop\rotaryencoderoutput\encoderplot_{subject}_{date}.png")
+        plt.savefig(save_path, bbox_inches='tight')
+    return onsets, offsets, bouts_duration
+
+#get stable offset: getting offsets coresponding to given onset, with metrics staying below given threshold
+def get_stable_offset(metric_smooth, o, threshold_offset, max_stop=6):
+    ct = 0
+    potential_offsets = np.where(metric_smooth[o:] <= threshold_offset)[0]
+    if len(potential_offsets) == 0:
+        return len(metric_smooth)
+    of = potential_offsets[ct]
+    while np.mean(metric_smooth[of + o: of + o + max_stop]) > threshold_offset and of < len(potential_offsets):
+        ct = ct + 1
+        of = np.where(metric_smooth[o:] <= threshold_offset)[0][ct]
+    return o + of
