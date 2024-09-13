@@ -1,0 +1,112 @@
+import numpy as np
+
+
+def trim_bouts(DLCbouts_duration, wheelbouts_duration):
+    total_bouts_DLC = np.sum(DLCbouts_duration)
+    total_bouts_wheel = np.sum(wheelbouts_duration)
+    min_total = min(total_bouts_DLC, total_bouts_wheel)   
+    def trim_durations(durations, target_sum):
+        cumulative_sum = 0
+        trim_index = 0
+        for idx, duration in enumerate(durations):
+            cumulative_sum += duration
+            if cumulative_sum >= target_sum:
+                trim_index = idx + 1
+                break
+        if cumulative_sum > target_sum:
+            adjustment = cumulative_sum - target_sum
+            durations[trim_index - 1] -= adjustment
+        if durations[trim_index - 1] < 30:
+            trim_index -= 1
+        return durations[:trim_index]
+    if total_bouts_DLC > total_bouts_wheel:
+        DLCbouts_duration_trimmed = trim_durations(DLCbouts_duration.copy(), min_total)
+        wheelbouts_duration_trimmed = wheelbouts_duration
+    else:
+        wheelbouts_duration_trimmed = trim_durations(wheelbouts_duration.copy(), min_total)
+        DLCbouts_duration_trimmed = DLCbouts_duration
+    return DLCbouts_duration_trimmed, wheelbouts_duration_trimmed
+
+
+
+
+
+def get_last_speed(DLConsets, DLCoffsets, DLCbouts_duration_trimmed, wheelonsets, wheeloffsets, wheelbouts_duration_trimmed):
+    # Function to trim the onsets and offsets to match the given trimmed bout durations
+    def trim_bouts_to_duration(onsets, offsets, trimmed_durations):
+        trimmed_onsets = onsets[:len(trimmed_durations)]
+        trimmed_offsets = []
+        for i, onset in enumerate(trimmed_onsets):
+            bout_duration = trimmed_durations[i]
+            offset = onset + bout_duration
+            trimmed_offsets.append(offset)
+        return np.array(trimmed_offsets)
+
+    trimmed_DLC_offsets = trim_bouts_to_duration(DLConsets, DLCoffsets, DLCbouts_duration_trimmed)
+    trimmed_wheel_offsets = trim_bouts_to_duration(wheelonsets, wheeloffsets, wheelbouts_duration_trimmed)
+    last_trimmed_DLC_offset = trimmed_DLC_offsets[-1]
+    last_trimmed_wheel_offset = trimmed_wheel_offsets[-1]
+    last_speed = max(last_trimmed_DLC_offset, last_trimmed_wheel_offset)
+    return last_speed
+
+
+
+
+#for now i take the average from the whole bout and then will plot only the neural trace up to the length of the shortest bout
+
+  
+
+def plot_bouts_firing_rate_speed_sorted(events, onsets, offsets, speed, spikeTimes, spikeClusters, clustersID):
+    events = DLConsets*0.1
+    average_DLC_speeds = []
+    for onset, offset in zip(DLConsets, DLCoffsets):
+        if onset < len(interpSpeedDLC) and offset < len(interpSpeedDLC):
+            segment = interpSpeedDLC[onset:offset]
+            segment_without_nan = segment[~np.isnan(segment)]
+            if len(segment_without_nan) > 0:
+                average_speed = np.mean(segment_without_nan)
+            else:
+                average_speed = np.nan  # Handle cases where the segment is all NaNs
+            average_DLC_speeds.append(average_speed)
+
+    binned_rasters = get_binned_rasters(spikeTimes, spikeClusters, clustersID, events, tscale=[None],
+       pre_time=5,post_time=5, bin_size=0.1, smoothing=0.005, return_fr=True,baseline_subtract=False) #also giving the time before onset
+    firing_rates = binned_rasters['rasters']
+    tscale = binned_rasters['tscale']
+    cscale = binned_rasters['cscale']
+    
+    #version for single neuron
+    clusterID = 44  # Since neuron indexing starts from 0, neuron 23 corresponds to index 22
+    firing_rates = firing_rates[:, clusterID, :]
+
+    average_DLC_speeds = np.array(average_DLC_speeds)  
+    sorted_indices = np.argsort(average_DLC_speeds)  
+    firing_rates_speed_sorted = firing_rates[sorted_indices, :]
+    
+    colors = [(1, 1, 1), (0, 0, 1)]  # White to blue colormap
+    cmap_name = 'white_to_blue'
+    custom_cmap = LinearSegmentedColormap.from_list(cmap_name, colors, N=256)
+    plt.figure(figsize=(10, 8))
+    plt.imshow(firing_rates_speed_sorted, aspect='auto', extent=[tscale[0], tscale[-1], 0, len(average_DLC_speeds)],
+               cmap=custom_cmap, norm=plt.Normalize(vmin=np.min(firing_rates_speed_sorted), vmax=np.max(firing_rates_speed_sorted)))
+    tick_positions = np.linspace(0, len(average_DLC_speeds) - 1, 10, dtype=np.int)
+    tick_labels = [f'{average_DLC_speeds[idx]:.3f}' for idx in sorted_indices[tick_positions]]
+    plt.yticks(tick_positions, tick_labels)
+    plt.colorbar(label='Firing Rate')
+    plt.xlabel('Time (s) from movement onset')
+    plt.ylabel('Average running speed in given bout (cm/.1s)')
+    plt.title('Firing rate across bouts')
+    plt.show()
+    plt.savefig(output_path / (f'bout_firing_rate_speed_sorted_{clusterID}.png'))
+
+
+
+    
+
+
+
+
+
+
+
+
