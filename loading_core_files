@@ -1,0 +1,136 @@
+#load core files 
+from pathlib import Path
+import os
+os.chdir(fr"C:\Users\Experiment\Desktop\codes\neural\polished_codes")
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from loading_neural_data import load_filtered_spike_data, load_merged_filtered_spike_data, neuralanalysis_paths_to_variables
+from ROI_calculating_speed import get_state_transitions, compute_correlations, get_plot_of_states_over_time, calculate_interpolated_speed, wheel_speed_correlation,  highest_corr_neurons_DLC, highest_corr_neurons_wheel
+from ROI_plotting_speed import bincount2D, plot_DLC_speed_correlation, get_DLC_locomotion_onsets_offsets, plot_movements_with_onsets, plot_wheel_speed_correlation, plot_speedcorrelation_half_session
+from final_wheelonsetsoffsets import get_wheel_data, detect_locomotion_episodes
+from results_functions import speed_correlation_both_traces, plot_both_traces_correlation_DLC_sorted, anatomy_correlation
+from trim_bouts import trim_bouts, get_last_speed
+
+
+
+def get_all_session_data(subject, probe2check):
+    recording_dates_path = Path(fr"C:\Users\Experiment\Desktop\unit_match_output") /   f"{subject}_recording_dates.npy" 
+    filenumbers_path = Path(r"C:\Users\Experiment\Desktop\unit_match_output") / f"{subject}_filenumbers.npy"
+    dates= np.load(recording_dates_path, allow_pickle=True)
+    filenumbers = np.load(filenumbers_path, allow_pickle=True)
+    results = []
+    for date, filenumber in zip(dates, filenumbers):
+        try:
+            [spikeTimes, spikeClusters, clustersID, r, tscale, clusters, wheelonsets, wheeloffsets, DLConsets, DLCoffsets, interpSpeedDLC, interpSpeedWheel, corrcoef_wheel, corrcoef_DLC] =  get_single_session_data(subject, date, filenumber, probe2check)
+            store_processed_data(subject, date)
+        except Exception as e:
+            print(f"An error occurred for date {date} and filenumber {filenumber}: {e}")
+            continue    
+
+
+def get_single_session_data(subject, date, filenumber, probe2check):
+    if probe2check == 'probe':
+      [spikeTimes, spikeClusters, clustersID] = load_merged_filtered_spike_data(subject, date, filenumber, probe2check)
+    elif probe2check == 'probe0':
+       [spikeTimes, spikeClusters, clustersID] = load_filtered_spike_data(subject, date, filenumber, probe2check)
+    else:
+      raise ValueError(f"Invalid value for probe2check: {probe2check}")
+   
+    [r, tscale, clusters] = bincount2D(spikeTimes, spikeClusters, xbin = 0.1, ybin = 0)
+    [downsampled_wheel, new_dt] = get_wheel_data (subject, date, filenumber)
+    onsets, offsets, wheelbouts_duration =  detect_locomotion_episodes( subject,
+                                                                   date,
+                                                                   downsampled_wheel,                   #ideally in cm/s
+                                                                   smooth=False,                      #whether to smooth wheel velocity before detection
+                                                                   min_time_between_onsets= int(3/new_dt),      # 5 minimum time between bouts in samples (default is 5 for dt=.3s)
+                                                                   min_bout_duration=int(3/ new_dt),
+                                                                   min_break_after_bout=int(3/ new_dt),          #number of samples for which signal needs to stay below offset trheshold after offset
+                                                                   threshold_onset=.2, #i changed              # 4velocty threshold, cm/s
+                                                                   min_velocity_threshold=1.5,        # 5 min avergae velocity required for each locomotion bout
+                                                                   threshold_offset=0.05,            #velocity threshold
+                                                                   plot=True,
+                                                                   filter_time=None                #returns onsets that fall in specified timestamps
+                                                                   ) 
+    [output_path, wheelonsets, wheeloffsets, topCam, data, videoPath]= neuralanalysis_paths_to_variables(subject, date, filenumber)
+    state_transitions = get_state_transitions(subject, date)
+    [interpSpeedDLC, interpSpeedWheel, tscale] = calculate_interpolated_speed (subject, date, filenumber, probe2check, spikeTimes, spikeClusters, data, videoPath, topCam, state_transitions, wheelonsets, wheeloffsets, xbin=0.1, step=6)   
+    DLCspeed_withzeros = interpSpeedDLC.copy()
+    DLCspeed_withzeros[np.isnan(DLCspeed_withzeros)] = 0
+    [DLConsets, DLCoffsets, DLCbouts_duration] = get_DLC_locomotion_onsets_offsets(DLCspeed_withzeros,
+                                                                                   min_time_between_onsets=30, 
+                                                                                   min_bout_duration=30, 
+                                                                                   min_break_after_bout=30, 
+                                                                                   threshold_onset=.2, 
+                                                                                   min_velocity_threshold=1.5, 
+                                                                                   threshold_offset=0.05, 
+                                                                                   xbin=0.1, 
+                                                                                   step=6,  
+                                                                                   plot=True)
+    #trimming part 
+    DLCbouts_duration_trimmed, wheelbouts_duration_trimmed = trim_bouts(DLCbouts_duration, wheelbouts_duration)
+    DLConsets = DLConsets[:len(DLCbouts_duration_trimmed)]
+    DLCoffsets = DLCoffsets[:len(DLCbouts_duration_trimmed)]
+    wheelonsets =  wheelonsets[:len(wheelbouts_duration_trimmed)]
+    wheeloffsets =  wheeloffsets[:len(wheelbouts_duration_trimmed)]
+    last_speed = get_last_speed(DLConsets, DLCoffsets, DLCbouts_duration_trimmed, wheelonsets, wheeloffsets, wheelbouts_duration_trimmed)
+    interpSpeedDLC= interpSpeedDLC[:last_speed]  
+    interpSpeedWheel = interpSpeedWheel[:last_speed]  
+    tscale = tscale[:last_speed]
+    r = r[:, :last_speed]
+    #[corrcoef_wheel, corrcoef_DLC] = DLC_speed_correlation(interpSpeedDLC, interpSpeedWheel, r, tscale, clusters, xbin=0.1, step=6)
+    corrcoef_wheel = compute_correlations(r, interpSpeedWheel, wheelonsets, wheeloffsets)
+    corrcoef_DLC = compute_correlations(r, interpSpeedDLC, DLConsets, DLCoffsets)
+    return spikeTimes, spikeClusters, clustersID, r, tscale, clusters, wheelonsets, wheeloffsets, DLConsets, DLCoffsets, interpSpeedDLC, interpSpeedWheel, corrcoef_wheel, corrcoef_DLC
+
+
+def store_processed_data(subject, date):
+    processed_data = Path(fr"C:\Users\Experiment\Desktop\processed_data\{subject}\{date}")
+    if not processed_data.exists():
+        processed_data.mkdir(parents=True)
+    var_names = ['spikeTimes', 'spikeClusters', 'clustersID', 'r', 'tscale', 'clusters', 'wheelonsets', 'wheeloffsets', 'DLConsets', 'DLCoffsets', 'interpSpeedDLC', 'interpSpeedWheel', 'corrcoef_wheel', 'corrcoef_DLC']
+    variables = [spikeTimes, spikeClusters, clustersID, r, tscale, clusters, wheelonsets, wheeloffsets, DLConsets, DLCoffsets, interpSpeedDLC, interpSpeedWheel, corrcoef_wheel, corrcoef_DLC]
+    for var_name, var_data in zip(var_names, variables):
+        np.save(processed_data / f'{var_name}.npy', var_data)
+    return
+
+
+
+
+def load_and_assign_processed_data(subject, date):
+    processed_data_dir = Path(fr"C:\Users\Experiment\Desktop\processed_data\{subject}\{date}")
+    
+    var_names = ['spikeTimes', 'spikeClusters', 'clustersID', 'r', 'tscale', 'clusters', 
+                 'wheelonsets', 'wheeloffsets', 'DLConsets', 'DLCoffsets', 'interpSpeedDLC', 
+                 'interpSpeedWheel', 'corrcoef_wheel', 'corrcoef_DLC']
+    
+    loaded_data = {}
+    
+    for var_name in var_names:
+        file_path = processed_data_dir / f'{var_name}.npy'
+        if file_path.exists():
+            loaded_data[var_name] = np.load(file_path)
+        else:
+            loaded_data[var_name] = None
+    
+    # Assign loaded variables to individual variables
+    spikeTimes = loaded_data['spikeTimes']
+    spikeClusters = loaded_data['spikeClusters']
+    clustersID = loaded_data['clustersID']
+    r = loaded_data['r']
+    tscale = loaded_data['tscale']
+    clusters = loaded_data['clusters']
+    wheelonsets = loaded_data['wheelonsets']
+    wheeloffsets = loaded_data['wheeloffsets']
+    DLConsets = loaded_data['DLConsets']
+    DLCoffsets = loaded_data['DLCoffsets']
+    interpSpeedDLC = loaded_data['interpSpeedDLC']
+    interpSpeedWheel = loaded_data['interpSpeedWheel']
+    corrcoef_wheel = loaded_data['corrcoef_wheel']
+    corrcoef_DLC = loaded_data['corrcoef_DLC']
+    
+    return (spikeTimes, spikeClusters, clustersID, r, tscale, clusters, wheelonsets, wheeloffsets,
+            DLConsets, DLCoffsets, interpSpeedDLC, interpSpeedWheel, corrcoef_wheel, corrcoef_DLC)
+
+ 
