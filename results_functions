@@ -1,0 +1,370 @@
+#final results functions
+
+from pathlib import Path
+import os
+os.chdir(fr"C:\Users\Experiment\Desktop\codes\neural\polished_codes")
+
+from pathlib import Path
+import numpy as np
+import sys
+import glob
+import pandas as pd
+import cv2
+from scipy.interpolate import interp1d
+from scipy.ndimage import gaussian_filter1d
+from scipy import stats
+from scipy.stats import binned_statistic
+from ROI_calculating_speed import bincount2D
+from ROI_calculating_speed import wheel_velocity, get_open_arena_speed
+import matplotlib.pyplot as plt
+import matplotlib as plt
+import cv2
+import seaborn as sns
+
+from matplotlib.colors import LinearSegmentedColormap
+import matplotlib.pyplot as plt
+
+
+
+from ROI_calculating_speed import bincount2D
+
+import sys,glob
+pinkRig_path= glob.glob(r'C:\Users\*\Documents\Github\PinkRigs')
+if len(pinkRig_path)>0:
+    pinkRig_path = Path(pinkRig_path[0])
+    sys.path.insert(0, (pinkRig_path.__str__()))
+    
+
+from Admin.csv_queryExp import load_data, bombcell_sort_units, format_cluster_data
+from Analysis.neural.utils.spike_dat import get_binned_rasters  
+from Analysis.pyutils.plotting import my_rasterPSTH 
+
+
+
+def get_raster_PSTH(spikeTimes, spikeClusters, events, clusterID, eventname, subject, date):
+    cluster_id = clusterID
+    my_rasterPSTH(spikeTimes, spikeClusters, [events], [cluster_id],
+                  pre_time=5, post_time=5, tscale=[None], error_bars='sem',
+                  include_PSTH=True, include_raster=False, reverse_raster=False,   #changed from include raster=True
+                  n_rasters=100, bin_size=0.1, smoothing=0.005, return_fr=True,
+                  baseline_subtract=False, event_colors=['blue'],
+                  pethlw=2, onset_marker='line', onset_marker_size=2,
+                  onset_marker_color='k', erralpha=0.5, rasterlw=2,
+                  plot_edge=None, ax=None, ax1=None)
+    return 
+    
+
+def speed_correlation_both_traces(start_time_minutes, end_time_minutes, r, tscale, clusters, interpSpeedDLC, interpSpeedWheel, DLConsets, DLCoffsets, wheelonsets, wheeloffsets):
+       
+    start_index = start_time_minutes*10*60  #converting to deciseconds the units for speed animation
+    end_index = end_time_minutes*10*60
+          
+    valid_indices = []
+    for i in range(start_index, end_index):
+        if i < 0 or i >= len(interpSpeedWheel):
+            continue
+        valid_indices.append(i)
+    valid_indices = np.array(valid_indices)
+    
+    r_filtered = r[:, valid_indices]
+    r_processed = stats.zscore(r_filtered, axis=1)
+    
+    interpSpeedWheel_filtered = interpSpeedWheel[valid_indices]
+    interpSpeedDLC_filtered = interpSpeedDLC[valid_indices]
+    
+    #wheel part
+    interp_mask = ~np.isnan(interpSpeedWheel_filtered)
+    valid_indices_masked_wheel = valid_indices[interp_mask]
+    r_masked = r[:, valid_indices_masked_wheel]
+    r_processed_masked = stats.zscore(r_masked, axis=1)
+    interpSpeedWheel_filtered_masked = interpSpeedWheel_filtered[interp_mask]
+    corrcoef_wheel = [np.corrcoef(r_processed_masked[np.where(clusters==i)[0][0]],  interpSpeedWheel_filtered_masked)[0, 1] for i in clusters]  
+    corrcoef_wheel = np.nan_to_num(corrcoef_wheel, nan=np.nanmean(corrcoef_wheel))
+    r_processed_wheel = r_processed[np.argsort(corrcoef_wheel),:] #imprtant modifcation!: sorting r only once i get the good corrcoef
+
+    #dlc part
+    interp_mask = ~np.isnan(interpSpeedDLC_filtered)
+    valid_indices_masked_DLC = valid_indices[interp_mask]
+    r_masked = r[:, valid_indices_masked_DLC]
+    r_processed_masked = stats.zscore(r_masked, axis=1)
+    interpSpeedDLC_filtered_masked = interpSpeedDLC_filtered[interp_mask]
+    corrcoef_DLC = [np.corrcoef(r_processed_masked[np.where(clusters==i)[0][0]],  interpSpeedDLC_filtered_masked)[0, 1] for i in clusters]   
+    r_processed_DLC = r_processed[np.argsort(corrcoef_DLC),:] #imprtant modifcation!: sorting r only once i get the good corrcoef
+    
+    valid_indices_DLC_set = set(valid_indices_masked_DLC)
+    filtered_DLConsets = np.array([x for x in DLConsets if x in valid_indices_DLC_set])
+    filtered_DLCoffsets = np.array([x for x in DLCoffsets if x in valid_indices_DLC_set])
+    valid_indices_wheel_set = set(valid_indices_masked_wheel)
+    filtered_wheelonsets = np.array([x for x in wheelonsets if x in valid_indices_wheel_set])
+    filtered_wheeloffsets = np.array([x for x in wheeloffsets if x in valid_indices_wheel_set])
+    return valid_indices, interpSpeedDLC_filtered, interpSpeedWheel_filtered, corrcoef_DLC, corrcoef_wheel, filtered_DLConsets, filtered_DLCoffsets, filtered_wheelonsets, filtered_wheeloffsets, r_processed_DLC, r_processed_wheel
+   
+
+
+
+def plot_both_traces_correlation_DLC_sorted(valid_indices, interpSpeedDLC_filtered, interpSpeedWheel_filtered, corrcoef_DLC, corrcoef_wheel, filtered_DLConsets, filtered_DLCoffsets, filtered_wheelonsets, filtered_wheeloffsets, r_processed_DLC, r_processed_wheel):
+    
+    xbin = 0.1
+    
+    #version for dlc sorted
+    fig = plt.figure(constrained_layout=True, figsize=(18, 10))  # Increase figure size for better visibility
+    gs = fig.add_gridspec(2, 3, width_ratios=[1, 8, 8], height_ratios=[1, 5])  # Adjust width ratios
+
+    (ax1, ax2, ax5), (ax3, ax4, ax6) = gs.subplots(sharex='col')
+    ax1.remove()
+
+    ax2.set_title('Open Arena traces', fontsize=16)
+    ax2.plot(interpSpeedDLC_filtered)
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
+    ax2.set_xlabel('Time (min)', fontsize=12)
+    ax2.set_ylabel('Speed', fontsize=12)
+       
+    for onset, offset in zip(filtered_DLConsets, filtered_DLCoffsets):
+        adjusted_onset = np.where(valid_indices == onset)[0][0]
+        adjusted_offset = np.where(valid_indices == offset)[0][0]
+        ax2.vlines(adjusted_onset, ymin=-np.max(interpSpeedDLC_filtered[~np.isnan(interpSpeedDLC_filtered)]) / 2, ymax=0, color='green', label='onset (green)')
+        ax2.vlines(adjusted_offset, ymin=-np.max(interpSpeedDLC_filtered[~np.isnan(interpSpeedDLC_filtered)])  / 2, ymax=0, color='red', label='offset (red)')
+
+    ax3.plot(np.sort(corrcoef_DLC), np.arange(0, len(clusters)))
+    ax3.set_ylabel('Neuron number', rotation=90, fontsize=12)
+    ax3.set_xlabel('Correlation', fontsize=12)
+    ax3.spines['top'].set_visible(False)
+    ax3.spines['right'].set_visible(False)
+
+    min_corr = np.min(corrcoef_DLC)
+    max_corr = np.max(corrcoef_DLC)
+    correlation_ticks = [min_corr, max_corr]
+    ax3.set_xticks(correlation_ticks)
+    ax3.set_xticklabels([f'{tick:.2f}' for tick in correlation_ticks], fontsize=8)
+
+    fig3 = ax4.matshow(r_processed_DLC, cmap='gray_r', aspect='auto', vmin=0, vmax=2)  #version with sorted neurons for DLC trace
+    ax4.set_xticks(ticks=[i * 60 / xbin for i in range(end_time_minutes-start_time_minutes)], labels=[str(i) for i in range(end_time_minutes-start_time_minutes)], fontsize=10) #scale if i take a part of recording
+    #ax4.set_xticks(ticks=[i * 600 / xbin for i in range(end_time_minutes-start_time_minutes)], labels=[str(i*10) for i in range(end_time_minutes-start_time_minutes)], fontsize=10)  #scale for whole recording taken
+
+    
+    ax4.invert_yaxis()
+    ax3.sharey(ax4)
+    ax4.yaxis.set_tick_params(length=0, labelleft=False)
+    ax4.set_yticks([0, round(len(clusters)/10)*10], [0, round(len(clusters)/10)*10], fontsize=12)
+    
+    for onset, offset in zip(filtered_DLConsets, filtered_DLCoffsets):
+        adjusted_onset = np.where(valid_indices == onset)[0][0]
+        adjusted_offset = np.where(valid_indices == offset)[0][0]
+        ax4.axvspan(adjusted_onset, adjusted_offset, color='green', alpha=0.3)
+
+    ax5.set_title('Rotary encoder traces', fontsize=16)
+    ax5.plot(interpSpeedWheel_filtered)
+    ax5.spines['top'].set_visible(False)
+    ax5.spines['right'].set_visible(False)
+    ax5.set_xlabel('Time (mins)', fontsize=12)
+    ax5.set_ylabel('Speed', fontsize=12)
+    
+    for onset, offset in zip(filtered_wheelonsets, filtered_wheeloffsets):
+        adjusted_onset = np.where(valid_indices == onset)[0][0]
+        adjusted_offset = np.where(valid_indices == offset)[0][0]
+        ax5.vlines(adjusted_onset, ymin=-np.max(interpSpeedWheel_filtered) / 2, ymax=0, color='green', label='onset (green)')
+        ax5.vlines(adjusted_offset, ymin=-np.max(interpSpeedWheel_filtered) / 2, ymax=0, color='red', label='offset (red)')
+
+    fig6 = ax6.matshow(r_processed_DLC, cmap='gray_r', aspect='auto', vmin=0, vmax=2)
+    ax6.set_xticks(ticks=[i * 60 / xbin for i in range(end_time_minutes-start_time_minutes)], labels=[str(i) for i in range(end_time_minutes-start_time_minutes)], fontsize=10)
+   # ax6.set_xticks(ticks=[i * 600 / xbin for i in range(end_time_minutes-start_time_minutes)], labels=[str(i*10) for i in range(end_time_minutes-start_time_minutes)], fontsize=10)  
+    ax6.invert_yaxis()
+    ax4.sharey(ax6)
+    ax6.yaxis.set_tick_params(length=0, labelleft=False)
+    ax6.set_yticks([0, round(len(clusters)/10)*10], [0, round(len(clusters)/10)*10], fontsize=14)
+
+    for onset, offset in zip(filtered_wheelonsets, filtered_wheeloffsets):
+        adjusted_onset = np.where(valid_indices == onset)[0][0]
+        adjusted_offset = np.where(valid_indices == offset)[0][0]
+        ax6.axvspan(adjusted_onset, adjusted_offset, color='green', alpha=0.3)
+
+    cbar = plt.colorbar(fig6, ax=ax6)
+    cbar.ax.set_yticks([0, 2], [0, 2], fontsize=12)
+
+    plt.show()
+
+    plt.savefig(output_path / (f'speed_correlation_DLCsorted_{start_time_minutes}-{end_time_minutes}_{subject}_{date}.png'))
+    
+
+
+def plot_wheel_sorted_both_traces(valid_indices, interpSpeedDLC_filtered, interpSpeedWheel_filtered, corrcoef_DLC, corrcoef_wheel, filtered_DLConsets, filtered_DLCoffsets, filtered_wheelonsets, filtered_wheeloffsets, r_processed_DLC, r_processed_wheel):
+    fig = plt.figure(constrained_layout=True, figsize=(18, 10))  # Increase figure size for better visibility
+    gs = fig.add_gridspec(2, 3, width_ratios=[1, 8, 8], height_ratios=[1, 5])  # Adjust width ratios
+
+    (ax1, ax2, ax5), (ax3, ax4, ax6) = gs.subplots(sharex='col')
+    ax1.remove()
+
+    ax2.set_title('Open Arena traces', fontsize=16)
+    ax2.plot(interpSpeedDLC_filtered)
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
+    ax2.set_xlabel('Time (min)', fontsize=12)
+    ax2.set_ylabel('Speed', fontsize=12)
+     
+    for onset, offset in zip(filtered_DLConsets, filtered_DLCoffsets):
+        adjusted_onset = np.where(valid_indices == onset)[0][0]
+        adjusted_offset = np.where(valid_indices == offset)[0][0]
+        ax2.vlines(adjusted_onset, ymin=-np.max(interpSpeedDLC_filtered[~np.isnan(interpSpeedDLC_filtered)]) / 2, ymax=0, color='green', label='onset (green)')
+        ax2.vlines(adjusted_offset, ymin=-np.max(interpSpeedDLC_filtered[~np.isnan(interpSpeedDLC_filtered)])  / 2, ymax=0, color='red', label='offset (red)')
+
+    ax3.plot(np.sort(corrcoef_wheel), np.arange(0, len(clusters)))
+    ax3.set_ylabel('Neuron number', rotation=90, fontsize=12)
+    ax3.set_xlabel('Correlation', fontsize=12)
+    ax3.spines['top'].set_visible(False)
+    ax3.spines['right'].set_visible(False)
+
+    min_corr = np.min(corrcoef_wheel)
+    max_corr = np.max(corrcoef_wheel)
+    correlation_ticks = [min_corr, max_corr]
+    ax3.set_xticks(correlation_ticks)
+    ax3.set_xticklabels([f'{tick:.2f}' for tick in correlation_ticks], fontsize=8)
+
+    fig3 = ax4.matshow(r_processed_wheel, cmap='gray_r', aspect='auto', vmin=0, vmax=2)  #version with sorted neurons for DLC trace
+    ax4.set_xticks(ticks=[i * 60 / xbin for i in range(end_time_minutes-start_time_minutes)], labels=[str(i) for i in range(end_time_minutes-start_time_minutes)], fontsize=10)
+    #ax4.set_xticks(ticks=[i * 600 / xbin for i in range(end_time_minutes-start_time_minutes)], labels=[str(i*10) for i in range(end_time_minutes-start_time_minutes)], fontsize=10)  
+
+    ax4.invert_yaxis()
+    ax3.sharey(ax4)
+    ax4.yaxis.set_tick_params(length=0, labelleft=False)
+    ax4.set_yticks([0, round(len(clusters)/10)*10], [0, round(len(clusters)/10)*10], fontsize=12)
+  
+    for onset, offset in zip(filtered_DLConsets, filtered_DLCoffsets):
+        adjusted_onset = np.where(valid_indices == onset)[0][0]
+        adjusted_offset = np.where(valid_indices == offset)[0][0]
+        ax4.axvspan(adjusted_onset, adjusted_offset, color='green', alpha=0.3)
+
+    ax5.set_title('Rotary encoder traces', fontsize=16)
+    ax5.plot(interpSpeedWheel_filtered)
+    ax5.spines['top'].set_visible(False)
+    ax5.spines['right'].set_visible(False)
+    ax5.set_xlabel('Time (mins)', fontsize=12)
+    ax5.set_ylabel('Speed', fontsize=12)
+  
+    for onset, offset in zip(filtered_wheelonsets, filtered_wheeloffsets):
+        adjusted_onset = np.where(valid_indices == onset)[0][0]
+        adjusted_offset = np.where(valid_indices == offset)[0][0]
+        ax5.vlines(adjusted_onset, ymin=-np.max(interpSpeedWheel_filtered) / 2, ymax=0, color='green', label='onset (green)')
+        ax5.vlines(adjusted_offset, ymin=-np.max(interpSpeedWheel_filtered) / 2, ymax=0, color='red', label='offset (red)')
+
+    fig6 = ax6.matshow(r_processed_wheel, cmap='gray_r', aspect='auto', vmin=0, vmax=2)
+    ax6.set_xticks(ticks=[i * 60 / xbin for i in range(end_time_minutes-start_time_minutes)], labels=[str(i) for i in range(end_time_minutes-start_time_minutes)], fontsize=10)
+    #ax6.set_xticks(ticks=[i * 600 / xbin for i in range(end_time_minutes-start_time_minutes)], labels=[str(i*10) for i in range(end_time_minutes-start_time_minutes)], fontsize=10)  
+
+    ax6.invert_yaxis()
+    ax4.sharey(ax6)
+    ax6.yaxis.set_tick_params(length=0, labelleft=False)
+    ax6.set_yticks([0, round(len(clusters)/10)*10], [0, round(len(clusters)/10)*10], fontsize=14)
+
+    for onset, offset in zip(filtered_wheelonsets, filtered_wheeloffsets):
+        adjusted_onset = np.where(valid_indices == onset)[0][0]
+        adjusted_offset = np.where(valid_indices == offset)[0][0]
+        ax6.axvspan(adjusted_onset, adjusted_offset, color='green', alpha=0.3)
+
+    cbar = plt.colorbar(fig6, ax=ax6)
+    cbar.ax.set_yticks([0, 2], [0, 2], fontsize=12)
+
+    plt.show()
+    plt.savefig(output_path / (f'speed_correlation_wheelsorted_{start_time_minutes}-{end_time_minutes}_{subject}_{date}.png'))
+    
+
+
+
+    
+#corrected xpos and depth function 
+
+
+
+def anatomy_correlation(subject, date, filenumber, probe2check, corrcoef_DLC, corrcoef_wheel):
+    if probe2check == 'probe':
+        probe = ['probe0', 'probe1']
+        ephys_dict = {'spikes': 'all', 'clusters': 'all'}
+        recordings = load_data(data_name_dict={'probe0': ephys_dict, 'probe1': ephys_dict},
+                               subject=subject, expDate=date,
+                               expNum=filenumber,
+                               checkSpikes='1',
+                               unwrap_probes=False, merge_probes=True)             
+    elif probe2check == 'probe0':
+        probe = ['probe0', 'probe1']
+        ephys_dict = {'spikes': 'all', 'clusters': 'all'}
+        recordings = load_data(data_name_dict={'probe0': ephys_dict, 'probe1': ephys_dict},
+                               subject=subject, expDate=date,
+                               expNum=filenumber,
+                               checkSpikes='1',
+                               unwrap_probes=False, merge_probes=False)
+    else:
+      raise ValueError(f"Invalid value for probe2check: {probe2check}")
+    
+    clusters = recordings[probe2check].iloc[0].clusters
+    clusInfo = format_cluster_data(clusters)
+    goodclusters = clusInfo.is_good
+
+    
+    xpos = clusInfo._av_xpos[goodclusters]
+    depths = clusInfo.depths[goodclusters]
+    output_path = Path(fr"C:\Users\Experiment\Desktop\neuraldataoutput\{subject}\{date}")
+    
+    all_corrcoef = np.concatenate([corrcoef_wheel, corrcoef_DLC])
+    vmin = np.min(all_corrcoef)
+    vmax = np.max(all_corrcoef)
+    
+    n_bins = len(xpos)  # Discretize the interpolation into bins
+    cmap = LinearSegmentedColormap.from_list('custom_cmap', ['blue', 'white', 'red'], N= n_bins)
+    
+ 
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    wheel_corrcoef = np.array(corrcoef_wheel)
+    ax = axes[0]
+    scatter = ax.scatter(xpos, depths, c=wheel_corrcoef, cmap=cmap, alpha=0.7, vmin=vmin, vmax=vmax)
+    fig.colorbar(scatter, ax=ax, label='Correlation Coefficient')
+    ax.set_xlabel('xpos')
+    ax.set_ylabel('depths')
+    ax.grid(True)
+    sns.scatterplot(x=xpos, y=depths, hue=wheel_corrcoef, palette=cmap, legend=None, ax=ax)
+    ax.set_title(f"Wheel Correlation")
+
+    DLC_corrcoef = np.array(corrcoef_DLC)
+    ax = axes[1]
+    scatter = ax.scatter(xpos, depths, c=DLC_corrcoef, cmap=cmap, alpha=0.7, vmin=vmin, vmax=vmax)
+    fig.colorbar(scatter, ax=ax, label='Correlation Coefficient')
+    ax.set_xlabel('xpos')
+    ax.set_ylabel('depths')
+    ax.grid(True)
+    sns.scatterplot(x=xpos, y=depths, hue=DLC_corrcoef, palette=cmap, legend=None, ax=ax)
+    ax.set_title(f"DLC Correlation")
+
+    plt.tight_layout()
+    plt.savefig(output_path / f'correlation_plots_{subject}_{date}.png')
+    plt.show()
+    return xpos, depths
+     
+
+
+
+
+def correlation_distribution(corrcoef_DLC, corrcoef_wheel, output_path, subject, date):
+    sns.set(style="whitegrid")
+    all_data = np.concatenate([corrcoef_DLC, corrcoef_wheel])
+    bins = np.histogram_bin_edges(all_data, bins='auto')
+    fig, ax = plt.subplots()
+    sns.histplot(corrcoef_DLC, bins=bins, kde=False, color='orange', label='open arena', stat='density', alpha=0.6, ax=ax)
+    sns.histplot(corrcoef_wheel, bins=bins, kde=False, color='green', label='running wheel', stat='density', alpha=0.3, ax=ax)
+    ax.set_xlabel('Correlation coefficient')
+    ax.set_ylabel('Number of neurons')
+    ax.legend()
+    plt.show()
+    plt.savefig(output_path / (f'distribution_of_correlations_{subject}_{date}.png'))
+
+    
+    
+
+def plot_traces_correlation(corrcoef_DLC, corrcoef_wheel):
+    plt.figure(figsize=(8, 6))
+    plt.scatter(corrcoef_DLC, corrcoef_wheel, cmap='viridis', alpha=0.7)
+    plt.xlabel('open arena')  #i.e. corrcoef_1
+    plt.ylabel('running wheel')
+    plt.title(fr"Stability of speed correlations across speeds")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+    
