@@ -1,0 +1,201 @@
+#single recording analysis 
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from pathlib import Path
+import os
+os.chdir(fr"C:\Users\Experiment\Desktop\codes\neural\polished_codes")
+from ROI_plotting_speed import  plot_DLC_speed_correlation,   plot_sig_only_stability_plots, plot_speedcorrelation_half_session_labeled_neurons, plot_movements_with_onsets, plot_wheel_speed_correlation, plot_speedcorrelation_half_session,   plot_labled_neurons_stability_plots, plot_DLC_vs_rotary_correlation_labeled_neurons
+from results_functions import get_raster_PSTH, speed_correlation_both_traces, plot_both_traces_correlation_DLC_sorted, anatomy_correlation, plot_traces_correlation
+from loading_core_files import load_and_assign_processed_data
+from heatmap_with_speed_traces import get_average_trace, plot_bouts_speed, heatmap_wheel_sortedwheelonsets, plot_combined_heatmap_DLC_sorted, get_sig_only_corrcoef,  plot_bouts_firing_rate_speed_sorted, get_PSTH_speed_trace, get_average_speed_since_onset
+from loading_neural_data import get_output_paths
+from ROI_calculating_speed import  get_highest_indices
+from scipy.stats import pearsonr
+from scipy import stats
+from scipy.stats import binned_statistic
+from tqdm import tqdm
+from speed_tuning_functions import  get_sig_ids, plot_all_firing_rates, plot_tuning_peaks, get_null_distribution_single_neuron, plot_spike_counts_per_bin,  get_validated_speed_scores,  get_venn_diagram_tuned_neurons,  get_observed_firing_rates, plot_firing_rate, get_sorted_speed_scores, get_scores_for_each_speed, get_speed_scores, get_speed_scores_distribution, load_speeds, trim_speed_traces, get_percentiles_and_labels, get_sig_tuned_neurons, get_plot_of_sig, get_spike_counts_per_bin 
+
+
+def process_single_recording(subject, date):
+    '''load data'''
+    [output_path, single_neuron_path]= get_output_paths(subject, date)
+    (spikeTimes, spikeClusters, clustersID, r, tscale, clusters, wheelonsets, wheeloffsets,
+     DLConsets, DLCoffsets, interpSpeedDLC, interpSpeedWheel, corrcoef_wheel, corrcoef_DLC) = load_and_assign_processed_data(subject, date)
+       
+    '''stabilities'''
+    [runningwheel_1, runningwheel_2]= plot_speedcorrelation_half_session (interpSpeedWheel, 'runningwheel', clusters, r, output_path, wheelonsets, wheeloffsets)
+    [DLC_1, DLC_2]= plot_speedcorrelation_half_session (interpSpeedDLC, 'openarena', clusters, r, output_path, DLConsets, DLCoffsets)
+    stability_index_wheel = np.corrcoef(runningwheel_1, runningwheel_2)[0,1]
+    stability_index_DLC = np.corrcoef(DLC_1, DLC_2)[0,1]
+
+    '''traces'''
+    pre_duration = 50
+    post_duration = 50
+    [average_DLConset_trace, DLConset_traces] = get_average_trace(pre_duration, post_duration, interpSpeedDLC, DLConsets)
+    [average_wheelonset_trace, wheelonset_traces] = get_average_trace(pre_duration, post_duration, interpSpeedWheel, wheelonsets)
+
+
+    return stability_index_wheel, stability_index_DLC, average_DLConset_trace, DLConset_traces, average_wheelonset_trace, wheelonset_traces
+
+
+
+def speed_tuned_single_recording(interpSpeedDLC, interpSpeedWheel, r, clusters, subject, date):
+    xbin=0.1
+    speed_bin = 2 #cm/second, changed from 1
+    min_duration = 9400 
+    
+    [output_path, single_neuron_path]= get_output_paths(subject, date)
+    
+    interpSpeedDLC_trimmed = interpSpeedDLC[:min_duration ]
+    interpSpeedWheel_trimmed = interpSpeedWheel[:min_duration ]
+    interpSpeedWheel_trimmed = interpSpeedWheel_trimmed /10
+    trimmed_r = r[:, :min_duration]
+    trimmed_r =  stats.zscore(trimmed_r, axis=1)  #new to normalize firing rate
+
+    [DLCspeed_scores, DLCnonabs_speed_scores, DLCsorted_null_speed_scores, DLC_speed_bins, DLC_firing_rates] = get_validated_speed_scores('interpSpeedDLC', interpSpeedDLC_trimmed, trimmed_r, min_duration, speed_bin, xbin, clusters, output_path)
+    [wheel_speed_scores, wheelnonabs_speed_scores, wheel_sorted_null_speed_scores, wheel_speed_bins, wheel_firing_rates] = get_validated_speed_scores('interpSpeedWheel', interpSpeedWheel_trimmed, trimmed_r, min_duration, speed_bin, xbin, clusters, output_path)
+    
+    [wheel_percentage_greater, wheel_speed_sig, wheel_sig_IDs]=get_sig_tuned_neurons(wheel_speed_scores, wheel_sorted_null_speed_scores)
+    [DLC_percentage_greater, DLC_speed_sig, DLC_sig_IDs]=get_sig_tuned_neurons(DLCspeed_scores, DLCsorted_null_speed_scores)   
+    [DLC_most_sig_ids, DLC_most_nonsig_ids, wheel_most_nonsig_ids, wheel_most_sig_ids] = get_sig_ids (DLC_percentage_greater, wheel_percentage_greater)
+    
+    
+    '''for clusterID in DLC_most_sig_ids:
+        plot_firing_rate(DLC_firing_rates, DLC_speed_bins, clusterID)
+       # plt.savefig(single_neuron_path / (f'sig_DLC_firing_rate_plot_{clusterID}.png'))
+        DLC_spike_counts_per_bin = get_spike_counts_per_bin(clusters, interpSpeedDLC_trimmed, xbin, trimmed_r, speed_bin)
+        plot_spike_counts_per_bin (clusterID, DLC_spike_counts_per_bin)
+      #  plt.savefig(single_neuron_path / (f'sig_DLC_spike_counts_per_bin_{clusterID}.png'))
+    for clusterID in wheel_most_sig_ids:
+        plot_firing_rate(wheel_firing_rates, wheel_speed_bins, clusterID)
+        plt.savefig(single_neuron_path / (f'sig_wheel_firing_rate_plot_{clusterID}.png'))
+        wheel_spike_counts_per_bin = get_spike_counts_per_bin(clusters, interpSpeedWheel_trimmed, xbin, trimmed_r, speed_bin) 
+        plot_spike_counts_per_bin (clusterID, wheel_spike_counts_per_bin)
+        plt.savefig(single_neuron_path/ (f'sig_wheel_spike_counts_per_bin_{clusterID}.png'))
+    for clusterID in DLC_most_nonsig_ids:
+        plot_firing_rate(DLC_firing_rates, DLC_speed_bins, clusterID)
+        plt.savefig(single_neuron_path / (f'nonsig_DLC_firing_rate_plot_{clusterID}.png'))
+        DLC_spike_counts_per_bin = get_spike_counts_per_bin(clusters, interpSpeedDLC_trimmed, xbin, trimmed_r, speed_bin)
+        plot_spike_counts_per_bin (clusterID, DLC_spike_counts_per_bin)
+        plt.savefig(single_neuron_path / (f'nonsig_DLC_spike_counts_per_bin_{clusterID}.png'))
+    for clusterID in wheel_most_nonsig_ids:
+        plot_firing_rate(wheel_firing_rates, wheel_speed_bins, clusterID)
+        plt.savefig(single_neuron_path / (f'nonsig_wheel_firing_rate_plot_{clusterID}.png'))
+        wheel_spike_counts_per_bin = get_spike_counts_per_bin(clusters, interpSpeedWheel_trimmed, xbin, trimmed_r, speed_bin) 
+        plot_spike_counts_per_bin (clusterID, wheel_spike_counts_per_bin)
+        plt.savefig(single_neuron_path/ (f'nonsig_wheel_spike_counts_per_bin_{clusterID}.png'))'''
+        
+    plot_all_firing_rates(DLC_firing_rates, DLC_speed_bins, clusters)
+    plt.savefig(output_path / (f'DLC_all_firing_rates.png'))
+    plot_all_firing_rates(wheel_firing_rates,wheel_speed_bins, clusters)
+    plt.savefig(output_path / (f'wheel_all_firing_rates.png'))
+    
+   
+    
+    get_plot_of_sig(DLC_percentage_greater)
+    plt.savefig(output_path / (f'proportion of sig DLC neurons.png'))
+    get_plot_of_sig(wheel_percentage_greater)
+    plt.savefig(output_path / (f'proportion of sig wheel neurons.png'))
+
+    return DLC_sig_IDs, wheel_sig_IDs, DLC_most_sig_ids, DLC_most_nonsig_ids, wheel_most_nonsig_ids, wheel_most_sig_ids, DLCnonabs_speed_scores, wheelnonabs_speed_scores
+
+
+
+
+def plots_for_single_recording(subject, date, stability_index_wheel, stability_index_DLC, average_DLConset_trace, DLConset_traces, average_wheelonset_trace, wheelonset_traces, DLC_sig_IDs, wheel_sig_IDs, DLC_most_sig_ids, DLC_most_nonsig_ids, wheel_most_nonsig_ids, wheel_most_sig_ids):
+    
+    [output_path, single_neuron_path]= get_output_paths(subject, date)
+    
+    '''load data'''
+    (spikeTimes, spikeClusters, clustersID, r, tscale, clusters, wheelonsets, wheeloffsets,
+     DLConsets, DLCoffsets, interpSpeedDLC, interpSpeedWheel, corrcoef_wheel, corrcoef_DLC) = load_and_assign_processed_data(subject, date)
+    
+    '''heatmaps'''
+    
+    #corrcoef_DLC =list(DLCnonabs_speed_scores.values())  #potential version to use the speed scores rather than the general corrcoef
+    
+    plot_combined_heatmap_DLC_sorted(wheelonsets, DLConsets, spikeTimes, spikeClusters, clustersID, corrcoef_DLC, average_DLConset_trace, DLConset_traces, average_wheelonset_trace, wheelonset_traces, subject, date, output_path)
+    plt.savefig(output_path / (f'speed_trace heatmap DLC sorted corrcoef_{subject}_{date}.png'))  
+    heatmap_wheel_sortedwheelonsets (wheelonsets, DLConsets, spikeTimes, spikeClusters, clustersID, corrcoef_wheel, average_DLConset_trace, DLConset_traces, average_wheelonset_trace, wheelonset_traces, subject, date, output_path)
+    plt.savefig(output_path / (f'speed_trace heatmap sorted by wheel corrcoef_{subject}_{date}.png'))
+ 
+    #only for sig clusters (incl only sig corrcoef)
+    sig_DLC_corrcoef = get_sig_only_corrcoef(DLC_sig_IDs, corrcoef_DLC, clustersID)
+    sig_wheel_corrcoef = get_sig_only_corrcoef(wheel_sig_IDs, corrcoef_wheel, clustersID)
+    sig_DLC_heatmap_DLC_sorted = plot_combined_heatmap_DLC_sorted(wheelonsets, DLConsets, spikeTimes, spikeClusters, DLC_sig_IDs, sig_DLC_corrcoef, average_DLConset_trace, DLConset_traces, average_wheelonset_trace, wheelonset_traces, subject, date, output_path)
+    plt.savefig(output_path / (f'sig only speed_trace heatmap DLC sorted corrcoef_{subject}_{date}.png'))  
+    sig_wheel_heatmap_wheel_sorted = heatmap_wheel_sortedwheelonsets (wheelonsets, DLConsets, spikeTimes, spikeClusters, wheel_sig_IDs, sig_wheel_corrcoef, average_DLConset_trace, DLConset_traces, average_wheelonset_trace, wheelonset_traces, subject, date, output_path)    
+    plt.savefig(output_path / (f'sig only speed_trace heatmap sorted by wheel corrcoef_{subject}_{date}.png'))
+
+    '''traces'''
+    pre_duration = 3 #changed from 30
+    post_duration = 3
+    DLConset_traces_averages = get_average_speed_since_onset(pre_duration, post_duration, interpSpeedDLC, DLConsets)
+    DLC_onset_sorted_traces = get_PSTH_speed_trace(pre_duration, post_duration, interpSpeedDLC, DLConsets) #trace is from -5 to 5s, sorted by avergae speed trace  from 0 to 3s
+    DLC_onset_sorted_traces = np.array (DLC_onset_sorted_traces)
+ 
+    '''plotting correlations'''
+    [runningwheel_1, runningwheel_2]= plot_speedcorrelation_half_session (interpSpeedWheel, 'runningwheel', clusters, r, output_path)
+    [DLC_1, DLC_2]= plot_speedcorrelation_half_session (interpSpeedDLC, 'openarena', clusters, r, output_path)
+    plot_traces_correlation(corrcoef_DLC, corrcoef_wheel)
+    plt.savefig(output_path / (f'speed_correlation_full_session.png'))
+    plot_traces_correlation(DLC_1, runningwheel_1)
+    plt.savefig(output_path / (f'speed_correlation_second_first_session.png'))
+    plot_traces_correlation(DLC_2, runningwheel_2)
+    plt.savefig(output_path / (f'speed_correlation_second_half_session.png'))
+    
+    '''with labeled neurons'''
+    #highest_indices  = get_highest_indices (corrcoef_wheel, corrcoef_DLC)
+    
+    
+    plot_labled_neurons_stability_plots( corrcoef_DLC, corrcoef_wheel, DLC_1, runningwheel_1, DLC_2, runningwheel_2, clustersID, sig_highest_indices, subject, date, output_path)
+
+    plot_speedcorrelation_half_session_labeled_neurons (interpSpeedDLC, 'openarena', clusters, r,  output_path, DLConsets, DLCoffsets, sig_highest_indices)
+    plot_speedcorrelation_half_session_labeled_neurons(interpSpeedWheel, 'runningwheel', clusters, r, output_path, wheelonsets, wheeloffsets, sig_highest_indices)
+    
+    #version with marked speed tuned 
+    plot_sig_only_stability_plots(corrcoef_DLC, corrcoef_wheel, DLC_1, runningwheel_1, DLC_2, runningwheel_2, clustersID,  wheel_sig_IDs, DLC_sig_IDs, subject, date, output_path)
+    
+
+
+     
+
+    
+    
+
+    
+    
+    
+    for clusterID in sample_clusters:
+        wheel_raster = get_raster_PSTH(spikeTimes, spikeClusters, wheelonsets*0.1, clusterID, 'wheelonsets', subject, date)
+        plt.savefig(single_neuron_path / (f'PSTH_wheel_onsets_cluster_sig_{clusterID}_{subject}_{date}.png')) 
+        DLC_raster = get_raster_PSTH(spikeTimes, spikeClusters, DLConsets*0.1, clusterID, 'DLConsets', subject, date)
+        wheel_raster = get_raster_PSTH(spikeTimes, spikeClusters, wheelonsets*0.1, clusterID, 'wheelonsets', subject, date)
+        plt.savefig(single_neuron_path / (f'PSTH_DLC_onsets_cluster_sig_{clusterID}_{subject}_{date}.png'))  
+        DLC_bouts_sorted_firing_rate = plot_bouts_firing_rate_speed_sorted(DLConsets*0.1, DLConsets, interpSpeedDLC, spikeTimes, spikeClusters, clustersID, pre_duration, post_duration, clusterID, corrcoef_DLC, corrcoef_wheel)
+        plt.savefig(single_neuron_path / (f'sig_bout_firing_rate_DLC_sorted_{clusterID}.png'))
+        wheel_bouts_sorted_firing_rate = plot_bouts_firing_rate_speed_sorted(wheelonsets*0.1, wheelonsets, interpSpeedWheel/10, spikeTimes, spikeClusters, clustersID, pre_duration, post_duration, clusterID, corrcoef_DLC, corrcoef_wheel)
+        plt.savefig(single_neuron_path / (f'sig_bout_firing_rate_wheel_sorted_{clusterID}.png'))
+        
+    for clusterID in wheel_most_sig_ids:
+        wheel_raster = get_raster_PSTH(spikeTimes, spikeClusters, wheelonsets*0.1, clusterID, 'wheelonsets', subject, date)
+        plt.savefig(single_neuron_path / (f'PSTH_wheel_onsets_cluster_sig_{clusterID}_{subject}_{date}.png')) 
+        wheel_bouts_sorted_firing_rate = plot_bouts_firing_rate_speed_sorted(wheelonsets*0.1, wheelonsets, interpSpeedWheel/10, spikeTimes, spikeClusters, clustersID, pre_duration, post_duration, clusterID)
+        plt.savefig(single_neuron_path / (f'sig_bout_firing_rate_wheel_sorted_{clusterID}.png'))
+    for clusterID in DLC_most_nonsig_ids:
+        DLC_raster = get_raster_PSTH(spikeTimes, spikeClusters, DLConsets*0.1, clusterID, 'DLConsets', subject, date)
+        plt.savefig(single_neuron_path / (f'PSTH_DLC_onsets_cluster_nonsig_{clusterID}_{subject}_{date}.png')) 
+        DLC_bouts_sorted_firing_rate = plot_bouts_firing_rate_speed_sorted(DLConsets*0.1, DLConsets, interpSpeedDLC, spikeTimes, spikeClusters, clustersID, pre_duration, post_duration, clusterID)
+        plt.savefig(single_neuron_path / (f'nonsig_bout_firing_rate_DLC_sorted_{clusterID}.png'))
+    for clusterID in wheel_most_nonsig_ids:
+        wheel_raster = get_raster_PSTH(spikeTimes, spikeClusters, wheelonsets*0.1, clusterID, 'wheelonsets', subject, date)
+        plt.savefig(single_neuron_path / (f'PSTH_wheel_onsets_cluster_nonsig_{clusterID}_{subject}_{date}.png'))  
+        wheel_bouts_sorted_firing_rate = plot_bouts_firing_rate_speed_sorted(wheelonsets*0.1, wheelonsets, interpSpeedWheel/10, spikeTimes, spikeClusters, clustersID, pre_duration, post_duration, clusterID)
+        plt.savefig(single_neuron_path / (f'nonsig_bout_firing_rate_wheel_sorted_{clusterID}.png'))
+
+    return
+
+
