@@ -1,0 +1,596 @@
+#speed tuning functions
+from pathlib import Path
+import os
+os.chdir(fr"C:\Users\Experiment\Desktop\codes\neural\polished_codes")
+import numpy as np
+from scipy.stats import pearsonr
+from tqdm import tqdm
+from pathlib import Path
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib import pyplot as plt
+from matplotlib_venn import venn2
+import os
+import seaborn as sns
+import pandas as pd
+from loading_neural_data import load_filtered_spike_data, load_merged_filtered_spike_data, neuralanalysis_paths_to_variables, get_output_paths
+from ROI_calculating_speed import get_state_transitions, calculate_interpolated_speed
+from ROI_plotting_speed import bincount2D, get_DLC_locomotion_onsets_offsets
+from final_wheelonsetsoffsets import get_wheel_data, detect_locomotion_episodes
+from loading_core_files import  get_single_session_data
+
+'''def get_validated_speed_scores(speed_type, speed, trimmed_r, min_duration, speed_bin, xbin, clusters, output_path):
+    speed_bins = np.arange(0, max(speed[~np.isnan(speed)]) + speed_bin, speed_bin)  
+    firing_rates = get_observed_firing_rates(clusters, speed, speed_bins, xbin, trimmed_r)
+ 
+    speed_scores = get_speed_scores(speed_bins, clusters, firing_rates)
+    nonabs_speed_scores = get_nonabs_speed_scores(speed_bins, clusters, firing_rates)
+    #getting null distribution
+    speed_list = load_speeds(speed_type)
+    speed_list = np.array (speed_list)                  #/10 #version for wheel good units!!!!
+    
+    trimmed_speeds= trim_speed_traces(speed_list, min_duration)  #modifying rn for wheel
+    null_speed_scores = get_scores_for_each_speed(clusters, trimmed_speeds, speed_bin,  xbin, trimmed_r)
+    null_speed_scores_path = os.path.join(output_path, "null_speed_scores.npy")
+    sorted_null_speed_scores = get_sorted_speed_scores(null_speed_scores)
+   # [percentiles_95, labeled_speed_scores] = get_percentiles_and_labels(sorted_null_speed_scores, speed_scores)
+   # labels = list(labeled_speed_scores.values())
+  #  label_counts = {'speedtuned': labels.count('speedtuned'), 'notspeedtuned': labels.count('notspeedtuned')}
+    return speed_scores, nonabs_speed_scores, sorted_null_speed_scores, speed_bins, firing_rates'''
+
+def get_validated_speed_scores(speed_type, speed, trimmed_r, min_duration, speed_bin, xbin, clusters, output_path):
+    speed_bins = np.arange(0, max(speed[~np.isnan(speed)]) + speed_bin, speed_bin)  
+    firing_rates = get_observed_firing_rates(clusters, speed, speed_bins, xbin, trimmed_r)
+    
+    #new part
+    #trimming speed bins only to have till the value of 15
+    if np.max(speed_bins) > 15:
+        trimmed_speed_bins = speed_bins[speed_bins <= 15]
+    trimmed_speed_bins = np.append(np.arange(0, 13, speed_bin), 13)
+    trimmed_firing_rates = {}
+    for key in firing_rates.keys():
+        trimmed_firing_rates[key] = firing_rates[key][:len(trimmed_speed_bins)]
+
+
+    speed_scores = get_speed_scores(speed_bins, clusters, firing_rates)
+    nonabs_speed_scores = get_nonabs_speed_scores(speed_bins, clusters, firing_rates)
+    #getting null distribution
+    speed_list = load_speeds(speed_type)
+    speed_list = np.array (speed_list)                  #/10 #version for wheel good units!!!!
+    
+    trimmed_speeds= trim_speed_traces(speed_list, min_duration)  #modifying rn for wheel
+    null_speed_scores = get_scores_for_each_speed(clusters, trimmed_speeds, speed_bin,  xbin, trimmed_r)
+    null_speed_scores_path = os.path.join(output_path, "null_speed_scores.npy")
+    sorted_null_speed_scores = get_sorted_speed_scores(null_speed_scores)
+   # [percentiles_95, labeled_speed_scores] = get_percentiles_and_labels(sorted_null_speed_scores, speed_scores)
+   # labels = list(labeled_speed_scores.values())
+  #  label_counts = {'speedtuned': labels.count('speedtuned'), 'notspeedtuned': labels.count('notspeedtuned')}
+    return speed_scores, nonabs_speed_scores, sorted_null_speed_scores, trimmed_speed_bins, trimmed_firing_rates
+    
+
+def compute_speed_firing_rates(spike_counts, speed, speed_bins, xbin):
+    speed_bin_indices = np.digitize(speed, bins=speed_bins) - 1  # Binning speed
+    time_spent_in_speed_bins = np.bincount(speed_bin_indices, minlength=len(speed_bins) - 1) * xbin  # Total time spent in each bin
+    time_spent_in_speed_bins = time_spent_in_speed_bins[:-1]
+    total_spike_counts_in_speed_bins = np.zeros(len(speed_bins) - 1)  # Total spike counts in each speed bin
+    for i in range(len(speed_bins) - 1): 
+        total_spike_counts_in_speed_bins[i] = np.sum(spike_counts[speed_bin_indices == i])
+    # Average firing rate for each bin
+    average_firing_rate = np.zeros_like(total_spike_counts_in_speed_bins)
+    non_zero_indices = time_spent_in_speed_bins != 0
+    average_firing_rate[non_zero_indices] = total_spike_counts_in_speed_bins[non_zero_indices] / time_spent_in_speed_bins[non_zero_indices]
+    average_firing_rate[~non_zero_indices] = 0
+    return average_firing_rate
+
+
+
+def get_observed_firing_rates(clusters, speed, speed_bins, xbin, r):
+    firing_rates = {}
+    spike_counts_by_bins ={}
+    for cluster_idx, cluster_id in enumerate(clusters):
+        spike_counts = r[cluster_idx, :]  # Spike counts of given cluster
+        average_firing_rate = compute_speed_firing_rates(spike_counts, speed, speed_bins, xbin)
+        firing_rates[cluster_id] = average_firing_rate
+    return firing_rates
+
+
+
+#firing rate as a funciton of speed for a given neuron
+ #  errors = np.std(firing_rates[clusterID])
+    #plt.errorbar(speed_bins, firing_rate, yerr=errors, fmt='o', ecolor='blue', capsize=5)
+def plot_firing_rate(firing_rates, speed_bins, clusterID):
+    speed_bins = speed_bins [:-1]
+    firing_rate = firing_rates[clusterID]
+    plt.figure(figsize=(10, 6))
+    plt.plot(speed_bins, firing_rate, marker='o', linestyle='-', color='b')
+    plt.xlabel('Speed Bins')
+    plt.ylabel('Firing Rate')
+    plt.title(f'Firing Rate vs Speed Bins for Cluster {clusterID}')
+    plt.grid(True)
+    plt.show()
+    
+    
+def get_spike_counts_per_bin(clusters, speed, xbin, r, speed_bin):
+    spike_counts_per_bin = {}
+    speed_bins = np.arange(0, max(speed[~np.isnan(speed)]) + speed_bin, speed_bin)
+    speed_bin_indices = np.digitize(speed, bins=speed_bins) - 1
+    for cluster_idx, cluster_id in enumerate(clusters):
+        spike_counts = r[cluster_idx, :]  # Spike counts of given cluster
+        bin_spike_counts = [spike_counts[speed_bin_indices == i] for i in range(len(speed_bins) - 1)]
+        spike_counts_per_bin[cluster_id] = bin_spike_counts
+    return spike_counts_per_bin
+
+
+def plot_spike_counts_per_bin(clusterID, spike_counts_per_bin):
+    plt.figure(figsize=(12, 6))
+    sns.boxplot(data=spike_counts_per_bin[clusterID], palette="Set3", width=0.5)
+    plt.title('Distribution of Spike Counts Across Speed Bins')
+    plt.xlabel('Speed Bins')
+    plt.ylabel('Spike Counts')
+    plt.show()
+
+    
+
+
+def plot_tuning_peaks(firing_rates, output_path):
+    max_firing_rates = []
+    for firing_rate in firing_rates.values():
+        max_firing_rate = np.max(firing_rate)
+        max_firing_rates.append(max_firing_rate)
+    plt.hist(max_firing_rates, bins='auto', edgecolor='black')
+    plt.xlabel('Max Firing Rate')
+    plt.ylabel('Frequency')
+    plt.title('Distirbution of tuning peaks')
+    plt.show()
+    plt.savefig(output_path / (f'tuning_peaks_distribution.png'))
+
+
+ #speed score = absolute persons r between cells firing rate and animals locomotion speed
+
+'''def get_speed_scores(speed_bins, clusters, firing_rates):
+    speed_bins = speed_bins [:-1]
+    speed_scores = {}
+    
+    for cluster_id, firing_rate in firing_rates.items():
+        firing_rate = np.nan_to_num(firing_rate, nan=0.0)  #new adding this line so that it works for e.g. EB037
+        correlation, _ = pearsonr(firing_rate, speed_bins)
+        speed_score = np.abs(correlation)
+        speed_scores[cluster_id] = speed_score
+    return speed_scores
+'''
+
+
+
+
+#version to take the min and max firing rate 
+def get_speed_scores(speed_bins, clusters, firing_rates): 
+    #nmew part
+    #trimming speed bins only to have till the value of 15
+    if np.max(speed_bins) > 15:
+        trimmed_speed_bins = speed_bins[speed_bins <= 15]
+    trimmed_speed_bins = np.append(np.arange(0, 13, 1), 13)
+    #trimming firing rates to be the length of speed_bins
+    for key in firing_rates.keys():
+        firing_rates[key] = firing_rates[key][:(len(speed_bins))]  
+    speed_scores = {}
+    for cluster_id, firing_rate in firing_rates.items():
+        firing_rate = np.nan_to_num(firing_rate, nan=0.0)  #new adding this line so that it works for e.g. EB037
+        firing_rate_min = np.min(firing_rate)
+        firing_rate_max = np.max(firing_rate)
+        speed_score = np.abs(firing_rate_min - firing_rate_max)
+        speed_scores[cluster_id] = speed_score
+    return speed_scores
+
+
+#leaving the original version so that i can still plot the correlation 
+'''def get_nonabs_speed_scores(speed_bins, clusters, firing_rates):
+    speed_bins = speed_bins [:-1]
+    speed_scores = {}
+    for cluster_id, firing_rate in firing_rates.items():
+        firing_rate = np.nan_to_num(firing_rate, nan=0.0)  #new adding this line so that it works for e.g. EB037
+        correlation, _ = pearsonr(firing_rate, speed_bins)
+        speed_score = correlation  
+        speed_scores[cluster_id] = speed_score
+    return speed_scores'''
+
+
+def get_nonabs_speed_scores(speed_bins, clusters, firing_rates):
+    #speed_bins = speed_bins[:-1]
+    if np.max(speed_bins)> 12:
+        speed_bins = speed_bins[speed_bins <= 12]
+    #trimming firing rates to be the length of speed_bins
+    for key in firing_rates.keys():
+        firing_rates[key] = firing_rates[key][:(len(speed_bins))]  
+    speed_scores = {}
+    for cluster_id, firing_rate in firing_rates.items():
+        firing_rate = np.nan_to_num(firing_rate, nan=0.0)  #new adding this line so that it works for e.g. EB037
+        correlation, _ = pearsonr(firing_rate, speed_bins)
+        speed_score = correlation  
+        speed_scores[cluster_id] = speed_score
+    return speed_scores
+
+
+
+#version only informative for the original scores
+def get_speed_scores_distribution(speed_scores, output_path):
+    speed_scores_values = list(speed_scores.values())
+    plt.figure(figsize=(10, 6))
+    plt.hist(speed_scores_values, bins='auto', edgecolor='black')
+    plt.xlabel('Speed Scores')
+    plt.ylabel('Frequency')
+    plt.title('Histogram of Speed Scores')
+    plt.grid(True)
+    plt.show()
+    plt.savefig(output_path / (f'{speed_scores}_distribution.png'))
+    
+    
+import seaborn as sns   
+def get_null_distribution_single_neuron(sorted_null_speed_scores, speed_scores, clusterID):
+   speed_score = speed_scores[clusterID] 
+   sorted_null_speed_scores =sorted_null_speed_scores[clusterID]
+   plt.figure(figsize=(10, 6))  # Set the figure size
+   sns.histplot(sorted_null_speed_scores, bins=15, kde=False)  
+   plt.axvline(x=speed_score, color='g', linestyle='-', label='Speed Score')
+   plt.title(f'Histogram of Speed Scores for Cluster {clusterID}')
+   plt.xlabel('Speed Score')
+   plt.ylabel('Frequency')
+   plt.grid(False)
+   plt.show()
+  
+
+
+def plot_speed_score_distributions(DLCsorted_null_speed_scores, DLCspeed_scores, wheel_sorted_null_speed_scores, wheel_speed_scores, sample_clusters, target_frequency=21):
+    default_labels = {
+        55: 'Open Arena Selective',
+        80: 'Running Wheel Selective',
+        10: 'Not Significantly Tuned'
+    }
+
+    # Set the seaborn style to white for a clean background without grid lines
+    sns.set(style="white")
+
+    def get_null_distribution_single_neuron(ax, sorted_null_speed_scores, speed_scores, clusterID, x_range=None, color='orange'):
+        speed_score = speed_scores[clusterID] 
+        sorted_null_speed_scores = sorted_null_speed_scores[clusterID]
+
+        # Determine the number of observations
+        total_count = len(sorted_null_speed_scores)
+
+        # Calculate the number of bins needed to have a total frequency of 21
+        if total_count > 0:
+            # Calculate the required bin width based on the target frequency
+            bin_width = (x_range[1] - x_range[0]) / target_frequency
+            bins = np.arange(x_range[0], x_range[1] + bin_width, bin_width)
+        else:
+            bins = 15  # Default bin number if there's no data
+
+        sns.histplot(sorted_null_speed_scores, bins=bins, kde=False, ax=ax, color=color)  
+        # Change the line color to red and increase the width
+        ax.axvline(x=speed_score, color='red', linestyle='-', linewidth=2.5, label='Speed Score')
+
+        # Remove spines for minimalism
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_visible(True)
+        ax.spines['bottom'].set_visible(True)
+
+        # Set x and y limits if provided
+        if x_range is not None:
+            ax.set_xlim(x_range)
+
+    # Combine all scores from DLC and WHEEL to determine the overall range
+    all_scores = []
+    for clusterID in sample_clusters:
+        all_scores.extend(DLCsorted_null_speed_scores[clusterID])
+        all_scores.extend(wheel_sorted_null_speed_scores[clusterID])
+
+    # Determine the x-axis range based on all scores
+    x_range = [min(all_scores), max(all_scores)]
+
+    # Create the figure and axes for the subplots (2 rows, len(sample_clusters) columns)
+    fig, axs = plt.subplots(2, len(sample_clusters), figsize=(15, 10), sharey='row', sharex='col')
+
+    # Generate the plots for DLC data (1st row)
+    for i, clusterID in enumerate(sample_clusters):
+        # Determine the color and label based on the cluster ID
+        label = default_labels.get(clusterID, f'Cluster {clusterID}')
+        if label == 'Open Arena Selective':
+            color = 'orange'
+        elif label == 'Running Wheel Selective':
+            color = 'brown'
+        else:  # Not Significantly Tuned or other clusters
+            color = 'lightblue'
+        
+        get_null_distribution_single_neuron(axs[0, i], DLCsorted_null_speed_scores, DLCspeed_scores, clusterID, x_range=x_range, color=color)
+        
+        if i == 0:
+            axs[0, i].set_ylabel('N of speed scores', fontsize=12)
+        else:
+            axs[0, i].set_ylabel('')
+        
+        # Set cluster label as title only for the top row
+        axs[0, i].set_title(label, fontsize=12)
+
+    # Generate the plots for WHEEL data (2nd row)
+    for i, clusterID in enumerate(sample_clusters):
+        # Use the same label and color logic
+        label = default_labels.get(clusterID, f'Cluster {clusterID}')
+        if label == 'Open Arena Selective':
+            color = 'orange'
+        elif label == 'Running Wheel Selective':
+            color = 'brown'
+        else:  # Not Significantly Tuned or other clusters
+            color = 'lightblue'
+        
+        get_null_distribution_single_neuron(axs[1, i], wheel_sorted_null_speed_scores, wheel_speed_scores, clusterID, x_range=x_range, color=color)
+        
+        if i == 0:
+            axs[1, i].set_ylabel('N of null speed scores', fontsize=12)
+        else:
+            axs[1, i].set_ylabel('')
+
+    # Set the x-axis label only for the last subplot in the second row
+    for ax in axs[0, :]:
+      ax.set_xlabel('Open Arena Speed Scores', fontsize=12)
+
+  # Set the x-axis label for the bottom row plots
+    for ax in axs[1, :]:
+      ax.set_xlabel('Running Wheel Speed Scores', fontsize=12)
+
+
+    # Adjust layout for better spacing
+    plt.tight_layout()
+    plt.show()
+
+
+
+
+   
+    
+   
+
+
+
+def get_all_speed(subject, probe2check):
+    recording_dates_path = Path(fr"C:\Users\Experiment\Desktop\unit_match_output") /   f"{subject}_recording_dates.npy" #part I added
+    filenumbers_path = Path(r"C:\Users\Experiment\Desktop\unit_match_output") / f"{subject}_filenumbers.npy"
+    dates= np.load(recording_dates_path, allow_pickle=True)
+    filenumbers = np.load(filenumbers_path, allow_pickle=True)
+    results = []
+    for date, filenumber in zip(dates, filenumbers):
+        try:
+            [spikeTimes, spikeClusters, clustersID, r, tscale, clusters, wheelonsets, wheeloffsets, DLConsets, DLCoffsets, interpSpeedDLC, interpSpeedWheel, corrcoef_wheel, corrcoef_DLC] =  get_single_session_data(subject, date, filenumber, probe2check)
+            interpSpeedDLC_path = Path(r"C:\Users\Experiment\Desktop\final_results") / f"{subject}_{date}_{filenumber}_interpSpeedDLC.npy"
+            interpSpeedWheel_path = Path(r"C:\Users\Experiment\Desktop\final_results") / f"{subject}_{date}_{filenumber}_interpSpeedWheel.npy"
+            np.save(interpSpeedDLC_path, interpSpeedDLC)
+            np.save(interpSpeedWheel_path, interpSpeedWheel)
+        except Exception as e:
+            print(f"An error occurred for date {date} and filenumber {filenumber}: {e}")
+            continue    
+
+
+
+    
+def load_speeds(speed_type):
+    directory =  r'C:\Users\Experiment\Desktop\final_results\interp_speed'
+    if speed_type == 'interpSpeedDLC':
+        speed_files = list(Path(directory).glob('*_interpSpeedDLC.npy'))
+        speed_list = [np.load(file) for file in speed_files]
+    elif speed_type == 'interpSpeedWheel':
+        speed_files = list(Path(directory).glob('*_interpSpeedWheel.npy')) 
+        speed_list = [np.load(file) for file in speed_files]
+        speed_list = [arr / 10 for arr in speed_list]
+    return speed_list
+
+
+
+
+def trim_speed_traces(speed_list, min_duration):
+    trimmed_speed_list = []
+    for speed_trace in speed_list:
+        if len(speed_trace) > min_duration:
+            # If the new speed trace is longer, trim it to match the original length
+            trimmed_speed_trace = speed_trace[:min_duration]
+        else:
+            # If the new speed trace is shorter or equal, keep it as is
+            trimmed_speed_trace = speed_trace
+        trimmed_speed_list.append(trimmed_speed_trace)
+    return trimmed_speed_list
+
+
+def process_speed(clusters, trimmed_speeds, speed_bin, xbin, trimmed_r, set_idx):
+    max_shuffled = np.nanmax(trimmed_speeds[set_idx])
+    bins = np.arange(0, max_shuffled + speed_bin, speed_bin)
+  #  bins = bins[:-1]
+    firing_rates = get_observed_firing_rates(clusters, trimmed_speeds[set_idx], bins, xbin, trimmed_r)
+    scores = get_speed_scores(bins, clusters, firing_rates)
+    return scores
+
+def get_scores_for_each_speed(clusters, trimmed_speeds, speed_bin,  xbin, trimmed_r):
+    speed_scores = []
+    for set_idx in range(len(trimmed_speeds)):
+            scores = process_speed(clusters, trimmed_speeds, speed_bin, xbin, trimmed_r, set_idx)
+            if scores is not None:
+                speed_scores.append(scores)
+    null_speed_scores = np.array(speed_scores)
+    return null_speed_scores
+
+
+def get_sorted_speed_scores(null_speed_scores):
+    sorted_speed_scores = {}
+    for set_scores in null_speed_scores:
+           for cluster_id, score in set_scores.items():
+               if cluster_id not in sorted_speed_scores:
+                   sorted_speed_scores[cluster_id] = []
+               sorted_speed_scores[cluster_id].append(score)
+    for cluster_id, scores in sorted_speed_scores.items():
+        sorted_speed_scores[cluster_id] = np.array(sorted(scores))
+    return sorted_speed_scores
+   
+
+
+def null_speed_scores_specific_neuron(sorted_null_speed_scores, output_path, clusterID):    
+    sorted_null_speed_score = sorted_null_speed_scores[clusterID]  #if i want to do one specific neuron
+  #  shuffled_sorted_speed_scores = list(shuffled_sorted_speed_scores.values()) #if i want the distribution of all shuffled speed scores
+    plt.figure(figsize=(10, 6))
+    plt.hist(sorted_null_speed_score, bins='auto', edgecolor='black')
+    plt.xlabel('Speed Scores')
+    plt.ylabel('Frequency')
+    plt.title('Histogram of Speed Scores')
+    plt.grid(True)
+    plt.show()
+
+
+
+#getting the 95th percentile of null distribution for each cluster and the label based on this score
+def get_percentiles_and_labels(sorted_null_speed_scores, speed_scores):
+    percentiles_95 = {}
+    for cluster_ID, scores in sorted_null_speed_scores.items():
+        percentile_95 = np.percentile(scores, 95)
+        percentiles_95[cluster_ID] = percentile_95
+    labeled_speed_scores = {}
+    for cluster_id, score in speed_scores.items():
+        percentile_95 = percentiles_95[cluster_id]
+        label = "speedtuned" if score > percentile_95 else "notspeedtuned"
+        labeled_speed_scores[cluster_id] = label
+    return percentiles_95, labeled_speed_scores
+
+
+
+
+
+def get_venn_diagram_tuned_neurons(DLC_labeled_speed_scores, wheel_labeled_speed_scores):
+    df_DLC = pd.DataFrame({'NeuronID': list(DLC_labeled_speed_scores.keys()), 'Label_DLC': list(DLC_labeled_speed_scores.values())})
+    df_wheel = pd.DataFrame({'NeuronID': list(wheel_labeled_speed_scores.keys()), 'Label_Wheel': list(wheel_labeled_speed_scores.values())})
+    df_merged = pd.merge(df_DLC, df_wheel, on='NeuronID', how='outer')
+    count_table = df_merged.groupby(['Label_DLC', 'Label_Wheel']).size().unstack(fill_value=0)
+    speedtuned_both = count_table.at['speedtuned', 'speedtuned'] if 'speedtuned' in count_table.index and 'speedtuned' in count_table.columns else 0
+    speedtuned_DLC_only = count_table.at['speedtuned', 'notspeedtuned'] if 'speedtuned' in count_table.index and 'notspeedtuned' in count_table.columns else 0
+    speedtuned_wheel_only = count_table.at['notspeedtuned', 'speedtuned'] if 'notspeedtuned' in count_table.index and 'speedtuned' in count_table.columns else 0
+    plt.figure(figsize=(8, 6))
+    venn2(subsets=(speedtuned_DLC_only, speedtuned_wheel_only, speedtuned_both), 
+          set_labels=('open arena', 'running wheel'))
+    plt.title('Speed tuned neurons')
+    plt.show()
+    plt.savefig(output_path / (f'venn_diagram.png'))
+
+
+
+def get_sig_tuned_neurons(speed_scores, sorted_null_speed_scores):
+    speed_sig = {}  # Dictionary to store if neuron is speed-tuned (less than 5% null scores greater)
+    percentage_greater = {}  # Dictionary to store percentage of null scores greater than actual score
+    for neuron_id in speed_scores:
+        speed_score = speed_scores[neuron_id]
+        sorted_null_scores = sorted_null_speed_scores[neuron_id]     
+        count_greater = sum(1 for score in sorted_null_scores if score > speed_score)
+        percentage = (count_greater / len(sorted_null_scores)) * 100
+        percentage_greater[neuron_id] = percentage
+        if percentage < 5:
+            speed_sig[neuron_id] = True  # Less than 5% are greater
+        else:
+            speed_sig[neuron_id] = False
+    sig_neurons_IDs = [neuron_id for neuron_id, sig in speed_sig.items() if sig]
+    sig_neurons_IDs = np.array(sig_neurons_IDs)
+    return percentage_greater, speed_sig, sig_neurons_IDs
+
+
+#function to get the duration of all recordings 
+def process_subjects(subjects, probe2check):
+    def get_recording_duration(subject, date, filenumber):
+        topcampath = Path(fr"\\zortex\Subjects\{subject}\{date}\{filenumber}\ONE_preproc\topCam\camera.times.{date}_{filenumber}_{subject}_topCam.npy")
+        if not topcampath.exists():
+            topcampath = Path(fr"\\zaru.cortexlab.net\Subjects\{subject}\{date}\{filenumber}\ONE_preproc\topCam\camera.times.{date}_{filenumber}_{subject}_topCam.npy")
+        topCam = np.load(topcampath)  # path with frame timings
+        topCam = topCam[:, 0]
+        duration = np.max(topCam)
+        return duration
+
+    def get_recordings_duration(subject, probe2check):
+        recordings_dates_path = Path(r"C:\Users\Experiment\Desktop\unit_match_output") / f"{subject}_recording_dates.npy"
+        filenumbers_path = Path(r"C:\Users\Experiment\Desktop\unit_match_output") / f"{subject}_filenumbers.npy"
+        dates = np.load(recordings_dates_path, allow_pickle=True)
+        filenumbers = np.load(filenumbers_path, allow_pickle=True)
+        results = []
+        for date, filenumber in zip(dates, filenumbers):
+            try:
+                duration = get_recording_duration(subject, date, filenumber)
+                results.append({'date': date, 'filenumber': filenumber, 'duration': duration})
+            except Exception as e:
+                print(f"An error occurred for subject {subject}, date {date}, and filenumber {filenumber}: {e}")
+                continue
+        df = pd.DataFrame(results)
+        path = Path(r"C:\Users\Experiment\Desktop\final_results") / f"{subject}_recordings_duration.csv"
+        df.to_csv(path, index=False)
+        return df
+
+    for subject in subjects:
+        df = get_recordings_duration(subject, probe2check)
+        print(f"Processed {subject}, DataFrame saved and returned.")
+        
+        
+
+def get_plot_of_sig(percentage_greater):
+    percentages = list(percentage_greater.values())
+    plt.figure(figsize=(10, 6))
+    plt.hist(percentages, bins=20, edgecolor='black', alpha=0.7)
+    plt.xlabel('proporiton of null scores higher than the actual score')
+    plt.ylabel('Frequency')
+    plt.xlim(0, 100)  # Set x-axis limit from 0 to 100
+    plt.axvline(x=5, color='red', linestyle='--', linewidth=2, label='5% line')
+    plt.grid(True)
+    plt.show()
+    
+
+def get_sig_ids (DLC_percentage_greater, wheel_percentage_greater):
+    DLC_sorted_percentage_greater = sorted(DLC_percentage_greater.items(), key=lambda x: x[1])
+    DLC_most_sig_ids = [neuron_id for neuron_id, _ in DLC_sorted_percentage_greater[:5]]
+    DLC_most_nonsig_ids = [neuron_id for neuron_id, _ in DLC_sorted_percentage_greater[-5:]]
+
+    wheel_sorted_percentage_greater = sorted(wheel_percentage_greater.items(), key=lambda x: x[1])
+    wheel_most_sig_ids = [neuron_id for neuron_id, _ in wheel_sorted_percentage_greater[:5]]
+    wheel_most_nonsig_ids = [neuron_id for neuron_id, _ in wheel_sorted_percentage_greater[-5:]]
+    return DLC_most_sig_ids, DLC_most_nonsig_ids, wheel_most_nonsig_ids, wheel_most_sig_ids
+
+
+
+def plot_all_firing_rates(firing_rates, speed_bins, clusters):
+  #  speed_bins = speed_bins[:-1]  # Remove the last bin edge to get the correct number of bins  
+    data = []
+    max_points = []
+    for clusterID in clusters:
+        firing_rate = firing_rates[clusterID]
+        max_idx = np.argmax(firing_rate)
+        for i, rate in enumerate(firing_rate):
+            data.append([speed_bins[i], rate, clusterID])
+        max_firing_rate = firing_rate[max_idx]
+        max_speed_bin = speed_bins[max_idx]
+        max_points.append([max_speed_bin, max_firing_rate, clusterID])
+    df = pd.DataFrame(data, columns=['Speed Bins', 'Firing Rate', 'Cluster ID'])
+    max_df = pd.DataFrame(max_points, columns=['Speed Bins', 'Firing Rate', 'Cluster ID'])
+    min_firing_rate = int(max_df['Firing Rate'].min())  # Get the minimum firing rate
+    max_firing_rate = int(max_df['Firing Rate'].max())  # Get the maximum firing rate
+    max_df['Firing Rate Binned'] = pd.cut(max_df['Firing Rate'], bins=range(min_firing_rate, max_firing_rate + 2), right=False)
+    heatmap_data = max_df.groupby(['Speed Bins', 'Firing Rate Binned'])['Cluster ID'].nunique().unstack(fill_value=0)
+    heatmap_data = heatmap_data.reindex(sorted(heatmap_data.index, reverse=True), axis=0)
+    heatmap_data = heatmap_data.reindex(columns=speed_bins, fill_value=0)
+    plt.figure(figsize=(12, 8))
+    sns.heatmap(heatmap_data, cmap='Reds', annot=False, cbar_kws={'label': 'N of neurons'}, linewidths=.5)
+    plt.xlabel('Speed Bins')
+    plt.ylabel('Maximal firing rate')
+    plt.xticks(ticks=range(len(speed_bins)), labels=speed_bins)
+    plt.show()
+    
+   
+    '''plt.figure(figsize=(10, 6))
+    sns.lineplot(x='Speed Bins', y='Firing Rate', hue='Cluster ID', data=df, 
+                 palette=['lightblue'] * len(clusters), legend=False, linewidth=1.5)  # Thinner lines
+    sns.scatterplot(x='Speed Bins', y='Firing Rate', data=max_df, s=50, color='blue', zorder=5)
+    plt.xlabel('Speed Bins')
+    plt.ylabel('Firing Rate')
+    plt.title('Firing Rate vs Speed Bins for All Clusters')
+    plt.grid(False)
+    plt.show()'''
+    
+    
+    
+    
